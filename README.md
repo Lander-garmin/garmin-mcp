@@ -44,6 +44,29 @@ Single-user, and read-only by default — with one **opt-in** write path for cre
 
 Every response is a Pydantic model serialised to JSON, with `null` for fields Garmin did not record.
 
+### Extended read-only tools
+
+Added in this fork (`src/garmin_mcp/extra_tools.py`). They return a `GarminData` envelope with the
+compacted Garmin payload (nulls dropped, long arrays downsampled), except `get_heart_rate_timeline`
+which is fully typed. All read-only.
+
+| Tool | What it returns |
+| ---- | --------------- |
+| `get_heart_rate_timeline` | Intraday heart rate with resting/min/max and the **last reading the watch synced** (closest thing to "current HR"). |
+| `get_daily_summary` | Everything Garmin has for one day: steps, calories, floors, intensity minutes, HR, stress, Body Battery, SpO2, respiration, sleep. |
+| `get_steps_timeline` | Steps in 15-minute buckets with activity level. |
+| `get_floors` / `get_intensity_minutes` / `get_spo2` / `get_hydration` | Daily wellness metrics with intraday detail. |
+| `get_body_battery_events` / `get_all_day_events` | What charged or drained Body Battery; the day's detected events. |
+| `get_stats_and_body` / `get_lifestyle_log` / `get_nutrition` / `get_menstrual_data` | Daily stats + body composition, lifestyle logging, food log, cycle tracking. |
+| `get_daily_steps_range` / `get_weigh_ins` / `get_blood_pressure` | Per-day steps, weigh-ins and blood pressure over a date range. |
+| `get_progress_summary` | Totals per activity type between dates (distance, duration, elevation). |
+| `get_running_tolerance` / `get_lactate_threshold` / `get_cycling_ftp` / `get_fitness_age` | Performance markers. |
+| `get_activities_by_date` / `get_last_activity` | Activities in a range (optionally by type); the most recent one. |
+| `get_activity_timeseries` | Second-by-second HR, pace, altitude, cadence, power... as named, downsampled series. |
+| `get_activity_power_zones` / `get_activity_split_summaries` / `get_activity_typed_splits` / `get_activity_gear` | Richer per-activity data. |
+| `get_scheduled_workouts` / `get_training_plans` / `get_goals` / `get_badges` | Training calendar, plans, goals, badges. |
+| `get_devices` / `get_gear` / `get_user_profile` | Devices with **last sync time**, gear with stats, profile and unit system. |
+
 ### Write tools (opt-in)
 
 These **create** data in your Garmin account and are disabled unless you set `GARMIN_WRITE_ENABLED=1`. All other tools stay read-only regardless.

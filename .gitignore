@@ -20,3 +20,8 @@ claude-progress.txt
 # Personal data — never commit
 tmp/
 Training_Program_*.md
+
+# local secrets
+.deploy.env
+render.env
+make_render_env.py
