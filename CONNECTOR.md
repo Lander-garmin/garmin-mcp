@@ -62,27 +62,23 @@ curl -s https://svc-sync-eu-2609.onrender.com/.well-known/oauth-authorization-se
 
 0 €/mes mientras se use un solo servicio Free en Render.
 
-## Mejora pendiente: versión ampliada (55 herramientas)
+## Versión ampliada (desplegada el 24/09/2026)
 
-En la rama local `extended-tools` de este repo hay una versión con 35 herramientas más
-(pulso intradía con última lectura del reloj, SpO2, hidratación, pisos, pesajes, tensión,
-dispositivos y última sincronización, objetivos, medallas, umbral de lactato, FTP, calendario
-de entrenos, series temporales de actividades, totales entre fechas...). Probada con la cuenta
-real y con tests (124 en verde). Sigue siendo solo lectura.
+El servicio de Render lee ahora de **https://github.com/Lander-garmin/garmin-mcp** (rama `main`),
+que añade `src/garmin_mcp/extra_tools.py`: 35 herramientas de solo lectura más (pulso intradía con
+la última lectura del reloj, SpO2, hidratación, pisos, pesajes, tensión, dispositivos y última
+sincronización, objetivos, medallas, umbral de lactato, FTP, calendario de entrenos, series
+temporales de actividades, totales entre fechas...). En total el servidor expone 63 herramientas;
+las 8 de escritura están desactivadas.
 
-Render solo puede leer código de un repositorio público de GitHub, GitLab o Bitbucket. Para
-publicarla:
+### Publicar cambios nuevos
 
-1. Crear un repositorio público vacío `garmin-mcp` en una cuenta de GitHub accesible.
-2. Subirlo desde este directorio (Git abrirá el navegador para iniciar sesión):
-   ```bash
-   git remote add origin https://github.com/USUARIO/garmin-mcp.git
-   git push -u origin extended-tools:main
-   ```
-3. En Render → servicio `svc-sync-eu-2609` → Settings → Build & Deploy → cambiar el repositorio a
-   `https://github.com/USUARIO/garmin-mcp` (rama `main`) → Manual Deploy. Si Render no deja
-   cambiar el repositorio, crear un servicio nuevo con las mismas variables de `render.env`,
-   actualizando `MCP_ISSUER_URL` a la nueva dirección.
+Render redespliega solo cuando cambia la rama `main` de GitHub:
 
-La dirección del conector no cambia si se reutiliza el mismo servicio, así que en claude.ai no
-hay que tocar nada.
+```bash
+cd C:\Users\dis6.AD\GARMIN\garmin-mcp
+git add -A && git commit -m "descripcion del cambio"
+git push github extended-tools:main
+```
+
+Comprobar tras el despliegue: `curl -s https://svc-sync-eu-2609.onrender.com/health`.
