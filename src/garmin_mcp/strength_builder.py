@@ -115,7 +115,10 @@ class BlockSpec:
 
     sets: int
     exercises: list[SetSpec]
-    rest_after_set: bool = True  # add a lap.button rest step inside the group
+    rest_after_set: bool = True  # add a rest step inside the group
+    # Rest length. None -> the rest ends on the lap button (user-controlled);
+    # a number -> a timed countdown the watch vibrates at, like a gym app timer.
+    rest_seconds: int | None = None
 
 
 @dataclass
@@ -165,13 +168,14 @@ def _interval_step(s: SetSpec, order: int) -> dict[str, Any]:
     return step
 
 
-def _rest_step(order: int) -> dict[str, Any]:
+def _rest_step(order: int, seconds: int | None = None) -> dict[str, Any]:
+    timed = seconds is not None and seconds > 0
     return {
         "type": "ExecutableStepDTO",
         "stepOrder": order,
         "stepType": _STEP_REST,
-        "endCondition": _END_LAP,
-        "endConditionValue": 0.0,
+        "endCondition": _END_TIME if timed else _END_LAP,
+        "endConditionValue": float(seconds) if timed and seconds is not None else 0.0,
         "targetType": _TARGET_NONE,
     }
 
@@ -215,7 +219,7 @@ def build_strength_workout(spec: StrengthWorkoutSpec) -> dict[str, Any]:
             _interval_step(s, counter.next()) for s in block.exercises
         ]
         if block.rest_after_set:
-            children.append(_rest_step(counter.next()))
+            children.append(_rest_step(counter.next(), block.rest_seconds))
         steps.append(
             {
                 "type": "RepeatGroupDTO",
@@ -264,7 +268,10 @@ def summarize(spec: StrengthWorkoutSpec) -> str:
             for s in block.exercises
         )
         tag = "superset" if len(block.exercises) > 1 else "exercise"
-        lines.append(f"  {block.sets}x {names}   ({tag})")
+        rest = ""
+        if block.sets > 1 and block.rest_after_set:
+            rest = f", rest {block.rest_seconds}s" if block.rest_seconds else ", rest: lap"
+        lines.append(f"  {block.sets}x {names}   ({tag}{rest})")
     if spec.notes:
         lines.append(f"  notes: {spec.notes}")
     return "\n".join(lines)

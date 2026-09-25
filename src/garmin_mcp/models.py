@@ -467,6 +467,16 @@ class StrengthBlockInput(BaseModel):
 
     sets: int = Field(description="Number of sets (repeat-group iterations).")
     exercises: list[StrengthExerciseInput]
+    rest_seconds: int | None = Field(
+        default=None,
+        ge=5,
+        le=900,
+        description=(
+            "Rest between sets in seconds. When set, the watch runs a countdown and "
+            "vibrates when it ends (like a gym app timer). Omit to end rest with the "
+            "lap button."
+        ),
+    )
 
 
 class StrengthWorkoutInput(BaseModel):

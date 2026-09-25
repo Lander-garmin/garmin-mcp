@@ -928,7 +928,9 @@ def _spec_from_input(
                     note=ex.note,
                 )
             )
-        blocks.append(BlockSpec(sets=block.sets, exercises=set_specs))
+        blocks.append(
+            BlockSpec(sets=block.sets, exercises=set_specs, rest_seconds=block.rest_seconds)
+        )
     spec = StrengthWorkoutSpec(
         name=workout.name, blocks=blocks, include_warmup=workout.include_warmup
     )
@@ -2138,7 +2140,9 @@ def _parse_endurance_score(date: str, raw: Any) -> EnduranceScore:
         gauge_lower_limit=_opt_int(payload.get("gaugeLowerLimit")),
         gauge_upper_limit=_opt_int(payload.get("gaugeUpperLimit")),
         contributors=contributors,
-        note=None if payload.get("overallScore") is not None else "No endurance score for this date.",
+        note=None
+        if payload.get("overallScore") is not None
+        else "No endurance score for this date.",
     )
 
 
@@ -2155,7 +2159,9 @@ def _parse_hill_score(date: str, raw: Any) -> HillScore:
         classification_id=_opt_int(payload.get("hillScoreClassificationId")),
         feedback_phrase_id=_opt_int(payload.get("hillScoreFeedbackPhraseId")),
         vo2_max=_opt_float(payload.get("vo2MaxPreciseValue") or payload.get("vo2Max")),
-        note=None if overall is not None else "No hill score yet — needs qualifying climbing efforts.",
+        note=None
+        if overall is not None
+        else "No hill score yet — needs qualifying climbing efforts.",
     )
 
 

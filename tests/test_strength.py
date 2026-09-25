@@ -329,3 +329,67 @@ def test_client_does_not_retry_writes(monkeypatch: pytest.MonkeyPatch) -> None:
     with pytest.raises(GarminClientError):
         asyncio.run(client.call("upload_workout", {}))
     assert calls["n"] == 1
+
+
+def test_timed_rest_uses_countdown_end_condition() -> None:
+    from garmin_mcp.strength_builder import (
+        BlockSpec,
+        SetSpec,
+        StrengthWorkoutSpec,
+        build_strength_workout,
+        summarize,
+    )
+
+    bench = SetSpec(
+        category="BENCH_PRESS",
+        exercise_name="BARBELL_BENCH_PRESS",
+        reps=8,
+        weight=80,
+        weight_unit="kg",
+    )
+    spec = StrengthWorkoutSpec(
+        name="Push",
+        blocks=[
+            BlockSpec(sets=4, exercises=[bench], rest_seconds=90),
+            BlockSpec(sets=3, exercises=[bench]),
+        ],
+        include_warmup=False,
+    )
+    payload = build_strength_workout(spec)
+    groups = payload["workoutSegments"][0]["workoutSteps"]
+    timed_rest = groups[0]["workoutSteps"][-1]
+    lap_rest = groups[1]["workoutSteps"][-1]
+    assert timed_rest["stepType"]["stepTypeKey"] == "rest"
+    assert timed_rest["endCondition"]["conditionTypeKey"] == "time"
+    assert timed_rest["endConditionValue"] == 90.0
+    assert lap_rest["endCondition"]["conditionTypeKey"] == "lap.button"
+    assert lap_rest["endConditionValue"] == 0.0
+    text = summarize(spec)
+    assert "rest 90s" in text and "rest: lap" in text
+
+
+def test_block_input_passes_rest_seconds_to_spec() -> None:
+    from garmin_mcp.models import StrengthWorkoutInput
+    from garmin_mcp.server import _spec_from_input
+
+    wi = StrengthWorkoutInput.model_validate(
+        {
+            "name": "Pull",
+            "blocks": [
+                {
+                    "sets": 3,
+                    "rest_seconds": 120,
+                    "exercises": [
+                        {
+                            "name": "Barbell Bent Over Row",
+                            "reps": 10,
+                            "weight": 80,
+                            "weight_unit": "kg",
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+    spec, _, _ = _spec_from_input(wi)
+    assert spec.blocks[0].rest_seconds == 120
