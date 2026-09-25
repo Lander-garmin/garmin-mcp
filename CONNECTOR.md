@@ -73,7 +73,7 @@ las 8 de escritura están desactivadas.
 
 ### Publicar cambios nuevos
 
-Render redespliega solo cuando cambia la rama `main` de GitHub:
+El servicio lee el repositorio como "Public Git Repository" (sin cuenta de GitHub conectada), así que Render **no** redespliega solo. Tras subir cambios a `main`, pulsar en Render **Manual Deploy → Deploy latest commit**:
 
 ```bash
 cd C:\Users\dis6.AD\GARMIN\garmin-mcp
@@ -82,3 +82,10 @@ git push github extended-tools:main
 ```
 
 Comprobar tras el despliegue: `curl -s https://svc-sync-eu-2609.onrender.com/health`.
+
+## Descanso con cuenta atrás en pesas (25/09/2026)
+
+`preview_strength_workout` / `create_strength_workout` aceptan `rest_seconds` por bloque. Con valor,
+el descanso del reloj es una cuenta atrás que vibra al acabar; sin él, el descanso termina con Lap.
+La tarea "Plan de la semana" usa 120 s en básicos y 75 s en accesorios. Requiere un reloj con perfil
+de Fuerza (el Forerunner 55 no lo tiene; el 165 sí).
