@@ -7,6 +7,7 @@
             <iq:product id="fr165m"/>
         </iq:products>
         <iq:permissions>
+            <iq:uses-permission id="Background"/>
             <iq:uses-permission id="Communications"/>
             <iq:uses-permission id="Fit"/>
             <iq:uses-permission id="FitContributor"/>

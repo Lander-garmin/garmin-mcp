@@ -8,48 +8,46 @@ import Toybox.Lang;
 import Toybox.Sensor;
 import Toybox.System;
 import Toybox.Time;
-import Toybox.Time.Gregorian;
 import Toybox.Timer;
 import Toybox.WatchUi;
 
-// Session states
-const ST_LOADING = 0;   // fetching today's plan
-const ST_NOPLAN = 1;    // nothing scheduled today
-const ST_ERROR = 2;     // could not reach the server
-const ST_READY = 3;     // plan loaded, choose Realizar / Ver
-const ST_WAIT = 4;      // "Pulsa START para empezar"
-const ST_SET = 5;       // doing a set
-const ST_REST = 6;      // resting between sets
-const ST_DONE = 7;      // all sets done, START to save
-const ST_SAVED = 8;     // saved, sending sets
+// Screens
+const ST_LOADING = 0;   // looking for today's plan
+const ST_START = 1;     // plan (or free session) ready: START to begin
+const ST_SET = 2;       // doing a set: START when finished
+const ST_LOG = 3;       // note reps and kg of the set just done
+const ST_REST = 4;      // rest countdown
+const ST_DONE = 5;      // all sets done: START to save
+const ST_SAVED = 6;     // saved
 
-const DEFAULT_REST_BETWEEN_EXERCISES = 90;
+const WEIGHT_STEP = 2.5;
+const REST_BETWEEN_EXERCISES = 90;
 
 class PesasModel {
     var state = ST_LOADING;
-    var message = "";
-    var plan = null;          // Dictionary from /watch/today
-    var ex = [];              // exercise list
+    var plan = null;
+    var ex = [];
+    var free = false;
+    var offline = false;
     var exIdx = 0;
     var setNo = 1;
-    var curR = 0;             // reps for the set being done
-    var curW = null;          // kg for the set being done (null = bodyweight)
+    var targetW = null;       // kg for the next set (null = bodyweight)
+    var logField = 0;         // 0 = reps, 1 = kg
+    var logR = 0;
+    var logW = null;
     var restTotal = 0;
     var restLeft = 0;
-    var restCountUp = 0;
-    var sets = [];            // performed sets sent to the server
-    var lapPending = false;   // a set is done but its lap is not written yet
+    var sets = [];
     var session = null;
     var fieldEx = null;
     var fieldReps = null;
     var fieldKg = null;
-    var sessionStartMs = 0;
-    var sessionStart = 0;
+    var startMs = 0;
+    var startEpoch = 0;
     var setStart = 0;
+    var finalElapsed = 0;
     var timer = null;
     var sendStatus = "";
-    var freeSession = false;
-    var finalElapsed = 0;
 
     function initialize() {
     }
@@ -60,10 +58,9 @@ class PesasModel {
 
     function fetchPlan() {
         state = ST_LOADING;
-        message = "Cargando entreno...";
         Communications.makeWebRequest(
-            SERVER_URL + "/watch/today",
-            {"k" => WATCH_KEY},
+            Secrets.SERVER_URL + "/watch/today",
+            {"k" => Secrets.WATCH_KEY, "date" => localDate()},
             {
                 :method => Communications.HTTP_REQUEST_METHOD_GET,
                 :responseType => Communications.HTTP_RESPONSE_CONTENT_TYPE_JSON
@@ -73,55 +70,63 @@ class PesasModel {
     }
 
     function onPlan(code, data) {
-        if (code == 200 && data != null && data["ok"] == true) {
-            if (data.hasKey("none")) {
-                state = ST_NOPLAN;
-                message = "Hoy no hay gym en el calendario";
-            } else {
-                Application.Storage.setValue("plan", data);
-                usePlan(data, "");
-            }
+        if (code == 200 && data instanceof Dictionary && data["ok"] == true) {
+            Application.Storage.setValue("plan", data);
+            usePlan(data);
         } else {
-            // No phone / no signal: use today's plan if it was downloaded earlier.
+            // No phone: use the plan the background service saved earlier today.
+            offline = true;
             var cached = Application.Storage.getValue("plan");
-            if (cached != null && todayIso().equals(cached["date"])) {
-                usePlan(cached, "Sin movil: entreno guardado");
+            if (cached instanceof Dictionary && localDate().equals(cached["date"])) {
+                usePlan(cached);
             } else {
-                state = ST_ERROR;
-                message = "Sin conexion con el movil";
+                usePlan(null);
             }
         }
         WatchUi.requestUpdate();
     }
 
-    function usePlan(data, note) {
-        plan = data;
-        ex = data["ex"];
-        message = note;
-        if (ex == null || ex.size() == 0) {
-            state = ST_NOPLAN;
-            message = "El entreno de hoy no tiene ejercicios";
-            return;
+    function usePlan(data) {
+        if (data != null && !data.hasKey("none") && data["ex"] != null && data["ex"].size() > 0) {
+            plan = data;
+            ex = data["ex"];
+            free = false;
+        } else {
+            plan = null;
+            free = true;
+            ex = [{"n" => "Ejercicio", "c" => "UNKNOWN", "e" => "UNKNOWN", "s" => 999, "rest" => 0}];
         }
-        state = ST_READY;
-        WatchUi.pushView(new PlanMenu(), new PlanMenuDelegate(), WatchUi.SLIDE_IMMEDIATE);
+        exIdx = 0;
+        setNo = 1;
+        targetW = current().hasKey("w") ? current()["w"].toFloat() : null;
+        state = ST_START;
     }
 
-    function todayIso() {
-        var d = Gregorian.info(Time.now(), Time.FORMAT_SHORT);
-        return d.year.format("%04d") + "-" + d.month.format("%02d") + "-" + d.day.format("%02d");
+    function current() {
+        return ex[exIdx];
     }
 
-    function planName() {
+    function targetReps() {
+        var e = current();
+        if (e.hasKey("r")) {
+            return e["r"];
+        }
+        if (e.hasKey("sec")) {
+            return e["sec"];
+        }
+        return 0;
+    }
+
+    function isTimed() {
+        return current().hasKey("sec");
+    }
+
+    // "Plan X 30/09 Gym Push 70 min" -> "Push"
+    function title() {
         if (plan == null) {
-            return "Gym libre";
+            return "Sesion libre";
         }
-        return plan["name"];
-    }
-
-    // "Plan X 30/09 Gym Push 70 min" (or "... Pesas Push ...") -> "Gym Push"
-    function shortName() {
-        var n = planName();
+        var n = plan["name"];
         var i = n.find("Gym ");
         var skip = 4;
         if (i == null) {
@@ -129,51 +134,26 @@ class PesasModel {
             skip = 6;
         }
         if (i == null) {
-            return "Gym";
+            return n.length() > 16 ? n.substring(0, 16) : n;
         }
         var rest = n.substring(i + skip, n.length());
         var sp = rest.find(" ");
-        var word = (sp == null) ? rest : rest.substring(0, sp);
-        if (word.length() == 0) {
-            return "Gym";
-        }
-        var name = "Gym " + word;
-        return name.length() > 15 ? name.substring(0, 15) : name;
+        return sp == null ? rest : rest.substring(0, sp);
     }
 
-    function startFreeSession() {
-        freeSession = true;
-        plan = null;
-        ex = [{"n" => "Serie", "c" => "UNKNOWN", "e" => "UNKNOWN", "s" => 99, "rest" => 0}];
-        chooseRealizar();
-    }
-
-    function chooseRealizar() {
-        exIdx = 0;
-        setNo = 1;
-        loadTargets();
-        state = ST_WAIT;
-        WatchUi.requestUpdate();
-    }
-
-    function current() {
-        return ex[exIdx];
-    }
-
-    function loadTargets() {
-        var e = current();
-        curR = e.hasKey("r") ? e["r"] : 0;
-        curW = e.hasKey("w") ? e["w"].toFloat() : null;
+    function activityName() {
+        return plan == null ? "Gym" : "Gym " + title();
     }
 
     // ------------------------------------------------------------------
-    // Recording
+    // Session
     // ------------------------------------------------------------------
 
-    function startSession() {
+    function begin() {
         Sensor.setEnabledSensors([Sensor.SENSOR_HEARTRATE]);
+        var name = activityName();
         session = ActivityRecording.createSession({
-            :name => shortName(),
+            :name => name.length() > 15 ? name.substring(0, 15) : name,
             :sport => Activity.SPORT_TRAINING,
             :subSport => Activity.SUB_SPORT_STRENGTH_TRAINING
         });
@@ -184,9 +164,9 @@ class PesasModel {
         fieldKg = session.createField("peso", 2, FitContributor.DATA_TYPE_FLOAT,
             {:mesgType => FitContributor.MESG_TYPE_LAP, :units => "kg"});
         session.start();
-        sessionStartMs = System.getTimer();
-        sessionStart = Time.now().value();
-        setStart = sessionStart;
+        startMs = System.getTimer();
+        startEpoch = Time.now().value();
+        setStart = startEpoch;
         timer = new Timer.Timer();
         timer.start(method(:onTick), 1000, true);
         state = ST_SET;
@@ -198,15 +178,107 @@ class PesasModel {
         if (session == null) {
             return finalElapsed;
         }
-        return (System.getTimer() - sessionStartMs) / 1000;
+        return (System.getTimer() - startMs) / 1000;
     }
 
-    function heartRate() {
-        var info = Activity.getActivityInfo();
-        if (info != null && info.currentHeartRate != null) {
-            return info.currentHeartRate;
+    // START on the set screen: the set is done, now note reps and kg.
+    function setDone() {
+        logR = targetReps();
+        logW = targetW;
+        if (free) {
+            logW = 0.0;
+            if (sets.size() > 0) {
+                var last = sets[sets.size() - 1];
+                logR = last["r"];
+                logW = last.hasKey("w") ? last["w"] : 0.0;
+            }
         }
-        return null;
+        logField = 0;
+        state = ST_LOG;
+        WatchUi.requestUpdate();
+    }
+
+    function hasWeightField() {
+        return logW != null;
+    }
+
+    // UP / DOWN on the log screen change the highlighted field.
+    function adjust(delta) {
+        if (state != ST_LOG) {
+            return;
+        }
+        if (logField == 0) {
+            logR = logR + delta;
+            if (logR < 0) {
+                logR = 0;
+            }
+        } else {
+            logW = logW + WEIGHT_STEP * delta;
+            if (logW < 0) {
+                logW = 0.0;
+            }
+        }
+        WatchUi.requestUpdate();
+    }
+
+    // START on the log screen: next field, or confirm the set.
+    function logNext() {
+        if (logField == 0 && hasWeightField()) {
+            logField = 1;
+            WatchUi.requestUpdate();
+            return;
+        }
+        confirmSet();
+    }
+
+    function confirmSet() {
+        var now = Time.now().value();
+        var e = current();
+        var s = {"c" => e["c"], "e" => e["e"], "r" => logR, "t" => setStart, "d" => now - setStart};
+        if (logW != null && !(free && logW == 0.0)) {
+            s["w"] = logW;
+        }
+        sets.add(s);
+        writeLap(e["n"], s);
+        if (logW != null) {
+            targetW = logW;   // keep the weight actually used for the next set
+        }
+
+        if (setNo < e["s"]) {
+            setNo += 1;
+            startRest(e["rest"]);
+        } else if (exIdx + 1 < ex.size()) {
+            exIdx += 1;
+            setNo = 1;
+            targetW = current().hasKey("w") ? current()["w"].toFloat() : null;
+            startRest(e["rest"] > 0 ? e["rest"] : REST_BETWEEN_EXERCISES);
+        } else {
+            state = ST_DONE;
+            buzz(2);
+        }
+        WatchUi.requestUpdate();
+    }
+
+    function writeLap(name, s) {
+        if (session == null) {
+            return;
+        }
+        fieldEx.setData(name.length() > 23 ? name.substring(0, 23) : name);
+        fieldReps.setData(s["r"]);
+        fieldKg.setData(s.hasKey("w") ? s["w"] : 0.0);
+        session.addLap();
+    }
+
+    function startRest(seconds) {
+        restTotal = seconds;
+        restLeft = seconds > 0 ? seconds : 0;
+        state = ST_REST;
+    }
+
+    function endRest() {
+        setStart = Time.now().value();
+        state = ST_SET;
+        WatchUi.requestUpdate();
     }
 
     function onTick() {
@@ -222,110 +294,21 @@ class PesasModel {
                     return;
                 }
             } else {
-                restCountUp += 1;
+                restLeft += 1;   // free rest: count up
             }
         }
         WatchUi.requestUpdate();
-    }
-
-    // UP / DOWN during a set change the load (or the reps if bodyweight);
-    // during the rest they correct the reps of the set just done.
-    function adjust(delta) {
-        if (state == ST_SET) {
-            if (curW != null) {
-                curW = curW + 2.5 * delta;
-                if (curW < 0) {
-                    curW = 0.0;
-                }
-            } else {
-                curR = curR + delta;
-                if (curR < 0) {
-                    curR = 0;
-                }
-            }
-        } else if (state == ST_REST && sets.size() > 0) {
-            var last = sets[sets.size() - 1];
-            var r = last["r"] + delta;
-            last["r"] = r < 0 ? 0 : r;
-        }
-        WatchUi.requestUpdate();
-    }
-
-    function completeSet() {
-        var now = Time.now().value();
-        var e = current();
-        var s = {"c" => e["c"], "e" => e["e"], "r" => curR, "t" => setStart, "d" => now - setStart};
-        if (curW != null) {
-            s["w"] = curW;
-        }
-        sets.add(s);
-        lapPending = true;
-
-        if (setNo < e["s"]) {
-            setNo += 1;
-            startRest(e["rest"]);
-        } else if (exIdx + 1 < ex.size()) {
-            exIdx += 1;
-            setNo = 1;
-            loadTargets();
-            var r = e["rest"];
-            startRest(r > 0 ? r : DEFAULT_REST_BETWEEN_EXERCISES);
-        } else {
-            writeLap();
-            state = ST_DONE;
-            buzz(2);
-        }
-        WatchUi.requestUpdate();
-    }
-
-    function startRest(seconds) {
-        restTotal = seconds;
-        restLeft = seconds;
-        restCountUp = 0;
-        state = ST_REST;
-    }
-
-    function endRest() {
-        writeLap();
-        setStart = Time.now().value();
-        state = ST_SET;
-        WatchUi.requestUpdate();
-    }
-
-    // One lap per set (set + following rest), tagged with exercise, reps, kg.
-    function writeLap() {
-        if (!lapPending || session == null || sets.size() == 0) {
-            return;
-        }
-        var last = sets[sets.size() - 1];
-        fieldEx.setData(exerciseLabel(last["e"]));
-        fieldReps.setData(last["r"]);
-        fieldKg.setData(last.hasKey("w") ? last["w"] : 0.0);
-        session.addLap();
-        lapPending = false;
-    }
-
-    function exerciseLabel(enumName) {
-        for (var i = 0; i < ex.size(); i += 1) {
-            if (ex[i]["e"].equals(enumName)) {
-                var n = ex[i]["n"];
-                return n.length() > 23 ? n.substring(0, 23) : n;
-            }
-        }
-        return "Serie";
     }
 
     function skipExercise() {
-        if (exIdx + 1 < ex.size()) {
-            writeLap();
+        if (free || exIdx + 1 >= ex.size()) {
+            state = ST_DONE;
+        } else {
             exIdx += 1;
             setNo = 1;
-            loadTargets();
+            targetW = current().hasKey("w") ? current()["w"].toFloat() : null;
             setStart = Time.now().value();
             state = ST_SET;
-        } else {
-            writeLap();
-            state = ST_DONE;
         }
         WatchUi.requestUpdate();
     }
@@ -338,7 +321,6 @@ class PesasModel {
     }
 
     function save() {
-        writeLap();
         finalElapsed = elapsed();
         stopTimer();
         if (session != null) {
@@ -348,11 +330,11 @@ class PesasModel {
         }
         state = ST_SAVED;
         buzz(1);
-        if (freeSession || sets.size() == 0) {
-            sendStatus = "Sesion guardada";
+        if (sets.size() == 0) {
+            sendStatus = "";
         } else {
-            sendStatus = "Enviando series...";
-            sendLog(buildLog());
+            sendStatus = "Enviando...";
+            sendLog({"start" => startEpoch, "dur" => finalElapsed, "name" => activityName(), "sets" => sets});
         }
         WatchUi.requestUpdate();
     }
@@ -368,7 +350,6 @@ class PesasModel {
     }
 
     function onAppStop() {
-        // Never lose a running session if the app is closed by the system.
         if (session != null && session.isRecording()) {
             save();
         }
@@ -378,14 +359,10 @@ class PesasModel {
     // Sending the performed sets
     // ------------------------------------------------------------------
 
-    function buildLog() {
-        return {"start" => sessionStart, "dur" => elapsed(), "name" => shortName(), "sets" => sets};
-    }
-
     function sendLog(body) {
         Application.Storage.setValue("pending", body);
         Communications.makeWebRequest(
-            SERVER_URL + "/watch/log?k=" + WATCH_KEY,
+            Secrets.SERVER_URL + "/watch/log?k=" + Secrets.WATCH_KEY,
             body,
             {
                 :method => Communications.HTTP_REQUEST_METHOD_POST,
@@ -399,9 +376,9 @@ class PesasModel {
     function onLogSent(code, data) {
         if (code == 200) {
             Application.Storage.deleteValue("pending");
-            sendStatus = "Series enviadas";
+            sendStatus = "Enviado a Garmin";
         } else {
-            sendStatus = "Se enviaran luego (" + code.toString() + ")";
+            sendStatus = "Se enviara al conectar";
         }
         WatchUi.requestUpdate();
     }
@@ -412,8 +389,6 @@ class PesasModel {
             sendLog(body);
         }
     }
-
-    // ------------------------------------------------------------------
 
     function buzz(kind) {
         if (!(Attention has :vibrate)) {

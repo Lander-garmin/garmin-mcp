@@ -3,48 +3,22 @@ import Toybox.Lang;
 import Toybox.System;
 import Toybox.WatchUi;
 
+// Minimal black-on-white screens, like Garmin's own workout pages.
+// Buttons: START = do / confirm, UP/DOWN = change a number, BACK = pause.
+
 function fmtKg(w) {
-    if (w == null) {
-        return "";
-    }
     if (w == w.toNumber()) {
-        return w.toNumber().format("%d") + " kg";
+        return w.toNumber().format("%d");
     }
-    return w.format("%.1f") + " kg";
+    return w.format("%.1f");
+}
+
+function seriesText(n) {
+    return n.format("%d") + (n == 1 ? " serie" : " series");
 }
 
 function fmtTime(sec) {
-    var m = sec / 60;
-    var s = sec % 60;
-    return m.format("%d") + ":" + s.format("%02d");
-}
-
-// "8 x 80 kg", "12 reps", "45 s"
-function targetText(m) {
-    var e = m.current();
-    if (e.hasKey("sec")) {
-        return e["sec"].format("%d") + " s" + (m.curW == null ? "" : " x " + fmtKg(m.curW));
-    }
-    if (m.curW == null) {
-        return m.curR.format("%d") + " reps";
-    }
-    return m.curR.format("%d") + " x " + fmtKg(m.curW);
-}
-
-function setText(s) {
-    var r = s["r"].format("%d");
-    return s.hasKey("w") ? r + " x " + fmtKg(s["w"]) : r + " reps";
-}
-
-function volumeKg(m) {
-    var v = 0.0;
-    for (var i = 0; i < m.sets.size(); i += 1) {
-        var s = m.sets[i];
-        if (s.hasKey("w")) {
-            v += s["w"] * s["r"];
-        }
-    }
-    return v.toNumber();
+    return (sec / 60).format("%d") + ":" + (sec % 60).format("%02d");
 }
 
 class MainView extends WatchUi.View {
@@ -57,164 +31,161 @@ class MainView extends WatchUi.View {
         var w = dc.getWidth();
         var h = dc.getHeight();
         var cx = w / 2;
-        dc.setColor(Graphics.COLOR_WHITE, Graphics.COLOR_BLACK);
+        dc.setColor(Graphics.COLOR_BLACK, Graphics.COLOR_WHITE);
         dc.clear();
 
         var st = m.state;
-        if (st == ST_LOADING || st == ST_READY) {
-            title(dc, cx, h * 0.38, "GYM");
-            text(dc, cx, h * 0.56, Graphics.FONT_XTINY, Graphics.COLOR_LT_GRAY, m.state == ST_LOADING ? "Buscando entreno de hoy..." : m.message);
-        } else if (st == ST_NOPLAN || st == ST_ERROR) {
-            title(dc, cx, h * 0.24, "GYM");
-            text(dc, cx, h * 0.42, Graphics.FONT_XTINY, Graphics.COLOR_WHITE, m.message);
-            text(dc, cx, h * 0.62, Graphics.FONT_XTINY, Graphics.COLOR_GREEN, "START  sesion libre");
-            text(dc, cx, h * 0.74, Graphics.FONT_XTINY, Graphics.COLOR_LT_GRAY, "BACK  salir");
-        } else if (st == ST_WAIT) {
-            drawWait(dc, m, cx, h);
+        if (st == ST_LOADING) {
+            txt(dc, cx, h * 0.50, Graphics.FONT_SMALL, "Gym");
+        } else if (st == ST_START) {
+            drawStart(dc, m, cx, h);
         } else if (st == ST_SET) {
-            drawSet(dc, m, cx, w, h);
+            drawSet(dc, m, cx, h);
+        } else if (st == ST_LOG) {
+            drawLog(dc, m, cx, w, h);
         } else if (st == ST_REST) {
-            drawRest(dc, m, cx, w, h);
+            drawRest(dc, m, cx, h);
         } else if (st == ST_DONE) {
-            drawDone(dc, m, cx, h, "START  guardar");
+            small(dc, cx, h * 0.28, "ENTRENO TERMINADO");
+            txt(dc, cx, h * 0.47, Graphics.FONT_MEDIUM, seriesText(m.sets.size()));
+            small(dc, cx, h * 0.62, fmtTime(m.elapsed()));
+            small(dc, cx, h * 0.80, "START guardar");
         } else if (st == ST_SAVED) {
-            drawDone(dc, m, cx, h, m.sendStatus);
-            text(dc, cx, h * 0.86, Graphics.FONT_XTINY, Graphics.COLOR_LT_GRAY, "BACK  salir");
+            small(dc, cx, h * 0.28, "GUARDADO");
+            txt(dc, cx, h * 0.47, Graphics.FONT_MEDIUM, seriesText(m.sets.size()));
+            small(dc, cx, h * 0.62, m.sendStatus);
+            small(dc, cx, h * 0.80, "BACK salir");
         }
     }
 
-    function drawWait(dc, m, cx, h) {
+    function drawStart(dc, m, cx, h) {
+        small(dc, cx, h * 0.24, m.free ? "SIN ENTRENO HOY" : "HOY");
+        txt(dc, cx, h * 0.42, Graphics.FONT_MEDIUM, m.title());
+        if (!m.free) {
+            small(dc, cx, h * 0.57, m.ex.size().format("%d") + " ejercicios");
+        }
+        small(dc, cx, h * 0.75, "START empezar");
+        if (!m.free) {
+            small(dc, cx, h * 0.86, "DOWN ver");
+        }
+    }
+
+    function drawSet(dc, m, cx, h) {
         var e = m.current();
-        if (m.freeSession) {
-            title(dc, cx, h * 0.24, "LIBRE");
-            text(dc, cx, h * 0.40, Graphics.FONT_XTINY, Graphics.COLOR_WHITE, "LAP al acabar cada serie");
-            text(dc, cx, h * 0.50, Graphics.FONT_XTINY, Graphics.COLOR_LT_GRAY, "UP/DOWN reps en descanso");
-            dc.setColor(Graphics.COLOR_GREEN, Graphics.COLOR_TRANSPARENT);
-            dc.fillRoundedRectangle(cx - 62, h * 0.66, 124, 28, 12);
-            text(dc, cx, h * 0.66 + 14, Graphics.FONT_XTINY, Graphics.COLOR_BLACK, "START empezar");
-            return;
-        }
-        text(dc, cx, h * 0.20, Graphics.FONT_XTINY, Graphics.COLOR_LT_GRAY, m.shortName());
-        text(dc, cx, h * 0.33, nameFont(e["n"]), Graphics.COLOR_WHITE, e["n"]);
-        text(dc, cx, h * 0.47, Graphics.FONT_SMALL, Graphics.COLOR_YELLOW, targetText(m));
-        text(dc, cx, h * 0.58, Graphics.FONT_XTINY, Graphics.COLOR_LT_GRAY,
-            e["s"].format("%d") + " series  -  " + m.ex.size().format("%d") + " ejercicios");
-        if (!m.message.equals("")) {
-            text(dc, cx, h * 0.66, Graphics.FONT_XTINY, Graphics.COLOR_ORANGE, m.message);
-        }
-        dc.setColor(Graphics.COLOR_GREEN, Graphics.COLOR_TRANSPARENT);
-        dc.fillRoundedRectangle(cx - 62, h * 0.71, 124, 28, 12);
-        text(dc, cx, h * 0.71 + 14, Graphics.FONT_XTINY, Graphics.COLOR_BLACK, "START empezar");
-    }
-
-    function drawSet(dc, m, cx, w, h) {
-        var e = m.current();
-        header(dc, m, cx, h);
-        text(dc, cx, h * 0.28, nameFont(e["n"]), Graphics.COLOR_WHITE, e["n"]);
-        if (m.freeSession) {
-            text(dc, cx, h * 0.55, Graphics.FONT_MEDIUM, Graphics.COLOR_YELLOW, "Serie " + m.setNo.format("%d"));
-            text(dc, cx, h * 0.79, Graphics.FONT_XTINY, Graphics.COLOR_LT_GRAY, "LAP al acabar");
-            return;
-        }
-        text(dc, cx, h * 0.40, Graphics.FONT_XTINY, Graphics.COLOR_LT_GRAY,
-            "Serie " + m.setNo.format("%d") + " de " + e["s"].format("%d") + "  |  Ej " + (m.exIdx + 1).format("%d") + "/" + m.ex.size().format("%d"));
-        text(dc, cx, h * 0.55, Graphics.FONT_MEDIUM, Graphics.COLOR_YELLOW, targetText(m));
-        if (e.hasKey("note")) {
-            text(dc, cx, h * 0.68, Graphics.FONT_XTINY, Graphics.COLOR_ORANGE, e["note"]);
-        }
-        text(dc, cx, h * 0.79, Graphics.FONT_XTINY, Graphics.COLOR_LT_GRAY, m.curW == null ? "UP/DOWN reps" : "UP/DOWN peso");
-        progressDots(dc, cx, h * 0.89, m.setNo, e["s"]);
-    }
-
-    function drawRest(dc, m, cx, w, h) {
-        // Countdown ring around the edge.
-        if (m.restTotal > 0) {
-            dc.setPenWidth(8);
-            dc.setColor(Graphics.COLOR_DK_GRAY, Graphics.COLOR_TRANSPARENT);
-            dc.drawCircle(cx, h / 2, cx - 5);
-            var frac = m.restLeft.toFloat() / m.restTotal;
-            if (frac > 0) {
-                dc.setColor(Graphics.COLOR_BLUE, Graphics.COLOR_TRANSPARENT);
-                dc.drawArc(cx, h / 2, cx - 5, Graphics.ARC_CLOCKWISE, 90, 90 - (360 * frac).toNumber());
+        if (m.free) {
+            small(dc, cx, h * 0.26, "SERIE " + m.setNo.format("%d"));
+            txt(dc, cx, h * 0.50, Graphics.FONT_MEDIUM, "Entrenando");
+        } else {
+            small(dc, cx, h * 0.20, "SERIE " + m.setNo.format("%d") + " DE " + e["s"].format("%d"));
+            name(dc, cx, h * 0.35, e["n"]);
+            var big = m.targetW != null ? fmtKg(m.targetW) + " kg" : m.targetReps().format("%d") + (m.isTimed() ? " s" : "");
+            txt(dc, cx, h * 0.55, Graphics.FONT_LARGE, big);
+            if (m.targetW != null) {
+                txt(dc, cx, h * 0.70, Graphics.FONT_SMALL, m.targetReps().format("%d") + (m.isTimed() ? " seg" : " reps"));
+            } else if (!m.isTimed()) {
+                small(dc, cx, h * 0.70, "reps");
             }
+        }
+        small(dc, cx, h * 0.85, "START al terminar");
+    }
+
+    // Like setting an alarm: the highlighted box is the one UP/DOWN changes.
+    function drawLog(dc, m, cx, w, h) {
+        small(dc, cx, h * 0.20, "SERIE " + m.setNo.format("%d") + " HECHA");
+        var top = (h * 0.32).toNumber();
+        var bh = (h * 0.34).toNumber();
+        if (m.hasWeightField()) {
+            box(dc, cx - 82, top, 78, bh, m.isTimed() ? "SEG" : "REPS", m.logR.format("%d"), m.logField == 0);
+            box(dc, cx + 4, top, 78, bh, "KG", fmtKg(m.logW), m.logField == 1);
+        } else {
+            box(dc, cx - 50, top, 100, bh, m.isTimed() ? "SEG" : "REPS", m.logR.format("%d"), true);
+        }
+        small(dc, cx, h * 0.76, "UP/DOWN cambiar");
+        small(dc, cx, h * 0.86, "START ok");
+    }
+
+    function drawRest(dc, m, cx, h) {
+        if (m.restTotal > 0 && m.restLeft > 0) {
+            dc.setColor(Graphics.COLOR_BLACK, Graphics.COLOR_TRANSPARENT);
+            dc.setPenWidth(5);
+            var deg = (360 * m.restLeft / m.restTotal).toNumber();
+            dc.drawArc(cx, h / 2, cx - 4, Graphics.ARC_CLOCKWISE, 90, 90 - deg);
             dc.setPenWidth(1);
         }
-        header(dc, m, cx, h);
-        text(dc, cx, h * 0.27, Graphics.FONT_XTINY, Graphics.COLOR_BLUE, "DESCANSO");
-        var t = m.restTotal > 0 ? fmtTime(m.restLeft) : "+" + fmtTime(m.restCountUp);
-        text(dc, cx, h * 0.43, Graphics.FONT_NUMBER_MEDIUM, Graphics.COLOR_WHITE, t);
-        if (m.sets.size() > 0) {
-            text(dc, cx, h * 0.59, Graphics.FONT_XTINY, Graphics.COLOR_YELLOW, "Hecho: " + setText(m.sets[m.sets.size() - 1]));
-            text(dc, cx, h * 0.68, Graphics.FONT_XTINY, Graphics.COLOR_LT_GRAY, "UP/DOWN reps");
-        }
-        text(dc, cx, h * 0.78, Graphics.FONT_XTINY, Graphics.COLOR_WHITE, nextText(m));
-    }
-
-    // "Sigue: serie 2/4" or, when the exercise changes, "Sigue: Lateral Raise".
-    function nextText(m) {
+        small(dc, cx, h * 0.24, "DESCANSO");
+        txt(dc, cx, h * 0.45, Graphics.FONT_NUMBER_HOT, fmtTime(m.restLeft));
         var e = m.current();
-        if (m.setNo > 1) {
-            return "Sigue: serie " + m.setNo.format("%d") + "/" + e["s"].format("%d");
+        var next = m.free ? "Serie " + m.setNo.format("%d")
+            : (m.setNo > 1 ? "Serie " + m.setNo.format("%d") + " de " + e["s"].format("%d") : e["n"]);
+        small(dc, cx, h * 0.66, "SIGUE");
+        name(dc, cx, h * 0.75, next);
+        small(dc, cx, h * 0.88, "START saltar");
+    }
+
+    function box(dc, x, y, bw, bh, label, value, active) {
+        if (active) {
+            dc.setColor(Graphics.COLOR_BLACK, Graphics.COLOR_TRANSPARENT);
+            dc.fillRoundedRectangle(x, y, bw, bh, 8);
+            dc.setColor(Graphics.COLOR_WHITE, Graphics.COLOR_TRANSPARENT);
+        } else {
+            dc.setColor(Graphics.COLOR_BLACK, Graphics.COLOR_TRANSPARENT);
+            dc.setPenWidth(2);
+            dc.drawRoundedRectangle(x, y, bw, bh, 8);
+            dc.setPenWidth(1);
         }
-        var n = e["n"];
-        return "Sigue: " + (n.length() > 13 ? n.substring(0, 13) : n);
+        var c = x + bw / 2;
+        dc.drawText(c, y + bh * 0.22, Graphics.FONT_XTINY, label, Graphics.TEXT_JUSTIFY_CENTER | Graphics.TEXT_JUSTIFY_VCENTER);
+        dc.drawText(c, y + bh * 0.62, Graphics.FONT_NUMBER_MILD, value, Graphics.TEXT_JUSTIFY_CENTER | Graphics.TEXT_JUSTIFY_VCENTER);
     }
 
-    function drawDone(dc, m, cx, h, footer) {
-        title(dc, cx, h * 0.22, m.state == ST_SAVED ? "GUARDADO" : "TERMINADO");
-        text(dc, cx, h * 0.40, Graphics.FONT_SMALL, Graphics.COLOR_WHITE, m.sets.size().format("%d") + " series");
-        text(dc, cx, h * 0.53, Graphics.FONT_XTINY, Graphics.COLOR_LT_GRAY, fmtTime(m.elapsed()) + "  -  " + volumeKg(m).format("%d") + " kg");
-        text(dc, cx, h * 0.70, Graphics.FONT_XTINY, Graphics.COLOR_GREEN, footer);
-    }
-
-    function header(dc, m, cx, h) {
-        var hr = m.heartRate();
-        var s = fmtTime(m.elapsed()) + (hr == null ? "" : "   " + hr.format("%d") + " ppm");
-        text(dc, cx, h * 0.14, Graphics.FONT_XTINY, Graphics.COLOR_LT_GRAY, s);
-    }
-
-    function progressDots(dc, cx, y, current, total) {
-        if (total > 8) {
+    // Exercise names: one line if short, two smaller lines if long.
+    function name(dc, x, y, n) {
+        if (n.length() <= 15) {
+            txt(dc, x, y, Graphics.FONT_SMALL, n);
             return;
         }
-        var gap = 12;
-        var x0 = cx - (total - 1) * gap / 2;
-        for (var i = 1; i <= total; i += 1) {
-            dc.setColor(i < current ? Graphics.COLOR_GREEN : (i == current ? Graphics.COLOR_YELLOW : Graphics.COLOR_DK_GRAY), Graphics.COLOR_TRANSPARENT);
-            dc.fillCircle(x0 + (i - 1) * gap, y, 4);
+        var cut = n.length() / 2;
+        var best = null;
+        for (var i = 0; i < n.length(); i += 1) {
+            if (n.substring(i, i + 1).equals(" ")) {
+                if (best == null || (i - cut).abs() < (best - cut).abs()) {
+                    best = i;
+                }
+            }
         }
+        if (best == null) {
+            txt(dc, x, y, Graphics.FONT_XTINY, n);
+            return;
+        }
+        txt(dc, x, y - 9, Graphics.FONT_XTINY, n.substring(0, best));
+        txt(dc, x, y + 9, Graphics.FONT_XTINY, n.substring(best + 1, n.length()));
     }
 
-    function nameFont(n) {
-        return n.length() > 14 ? Graphics.FONT_XTINY : Graphics.FONT_SMALL;
+    function small(dc, x, y, t) {
+        txt(dc, x, y, Graphics.FONT_XTINY, t);
     }
 
-    function title(dc, x, y, t) {
-        text(dc, x, y, Graphics.FONT_MEDIUM, Graphics.COLOR_ORANGE, t);
-    }
-
-    function text(dc, x, y, font, color, t) {
-        dc.setColor(color, Graphics.COLOR_TRANSPARENT);
+    function txt(dc, x, y, font, t) {
+        dc.setColor(Graphics.COLOR_BLACK, Graphics.COLOR_TRANSPARENT);
         dc.drawText(x, y, font, t, Graphics.TEXT_JUSTIFY_CENTER | Graphics.TEXT_JUSTIFY_VCENTER);
     }
 }
 
-// START = select, BACK/LAP = back, UP = previous page, DOWN = next page,
-// hold UP = menu (Forerunner 55 buttons).
 class MainDelegate extends WatchUi.BehaviorDelegate {
     function initialize() {
         BehaviorDelegate.initialize();
     }
 
+    // START: begin / set done / confirm / skip rest / save
     function onSelect() {
         var m = getModel();
         var st = m.state;
-        if (st == ST_NOPLAN || st == ST_ERROR) {
-            m.startFreeSession();
-        } else if (st == ST_WAIT) {
-            m.startSession();
+        if (st == ST_START) {
+            m.begin();
         } else if (st == ST_SET) {
-            m.completeSet();
+            m.setDone();
+        } else if (st == ST_LOG) {
+            m.logNext();
         } else if (st == ST_REST) {
             m.endRest();
         } else if (st == ST_DONE) {
@@ -223,32 +194,23 @@ class MainDelegate extends WatchUi.BehaviorDelegate {
         return true;
     }
 
+    // BACK: pause while training; otherwise leave the app.
     function onBack() {
         var m = getModel();
-        var st = m.state;
-        if (st == ST_SET) {
-            m.completeSet();
+        if (m.session != null) {
+            WatchUi.pushView(new PauseMenu(), new PauseMenuDelegate(), WatchUi.SLIDE_UP);
             return true;
         }
-        if (st == ST_REST) {
-            m.endRest();
-            return true;
-        }
-        if (st == ST_DONE) {
-            return true;
-        }
-        if (st == ST_WAIT && m.plan != null && !m.freeSession) {
-            // Back to "Hoy: Realizar / Ver", like a scheduled run.
-            m.state = ST_READY;
-            WatchUi.pushView(new PlanMenu(), new PlanMenuDelegate(), WatchUi.SLIDE_RIGHT);
-            return true;
-        }
-        // Not recording: BACK leaves the app.
         return false;
     }
 
     function onNextPage() {
-        getModel().adjust(-1);
+        var m = getModel();
+        if (m.state == ST_START && !m.free) {
+            WatchUi.pushView(new PlanDetailMenu(), new PlanDetailDelegate(), WatchUi.SLIDE_UP);
+        } else {
+            m.adjust(-1);
+        }
         return true;
     }
 
@@ -258,10 +220,6 @@ class MainDelegate extends WatchUi.BehaviorDelegate {
     }
 
     function onMenu() {
-        var m = getModel();
-        if (m.session != null || m.state == ST_DONE) {
-            WatchUi.pushView(new SessionMenu(), new SessionMenuDelegate(), WatchUi.SLIDE_UP);
-        }
-        return true;
+        return onBack();
     }
 }

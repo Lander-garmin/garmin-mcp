@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build the "Pesas" watch app and install it on a watch connected by USB.
+# Build the "Gym" watch app and install it on a watch connected by USB.
 # Usage: ./build.sh [device]   (default fr55; the watch must be mounted, e.g. D:\GARMIN)
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -15,8 +15,10 @@ env = open(sys.argv[1], encoding="utf-8").read()
 secret = re.search(r'JWT_SECRET="?([^"\n]+)"?', env).group(1)
 key = hmac.new(secret.encode(), b"watch-api", hashlib.sha256).hexdigest()[:32]
 open("source/Secrets.mc", "w", encoding="utf-8").write(
-    'const SERVER_URL = "https://svc-sync-eu-2609.onrender.com";\n'
-    f'const WATCH_KEY = "{key}";\n'
+    '(:background)\nmodule Secrets {\n'
+    '    const SERVER_URL = "https://svc-sync-eu-2609.onrender.com";\n'
+    f'    const WATCH_KEY = "{key}";\n'
+    '}\n'
 )
 print("Secrets.mc written")
 PY
@@ -30,14 +32,15 @@ PY
 
 mkdir -p bin
 MONKEYC="$SDK_BIN/monkeyc"; [ -f "$MONKEYC.bat" ] && MONKEYC="$MONKEYC.bat"
-"$MONKEYC" -d "$DEVICE" -f monkey.jungle -o bin/Pesas.prg -y developer_key.der -l 0 -r
-echo "built bin/Pesas.prg for $DEVICE"
+"$MONKEYC" -d "$DEVICE" -f monkey.jungle -o bin/Gym.prg -y developer_key.der -l 0 -r
+echo "built bin/Gym.prg for $DEVICE"
 
+# Same file name as the first install so the watch replaces the app in place.
 for drive in /d /e /f /g; do
   if [ -d "$drive/GARMIN/APPS" ]; then
-    cp bin/Pesas.prg "$drive/GARMIN/APPS/PESAS.PRG"
+    cp bin/Gym.prg "$drive/GARMIN/APPS/PESAS.PRG"
     echo "installed to $drive/GARMIN/APPS/PESAS.PRG - unplug the watch to finish"
     exit 0
   fi
 done
-echo "watch not found over USB; copy bin/Pesas.prg to GARMIN/APPS manually"
+echo "watch not found over USB; copy bin/Gym.prg to GARMIN/APPS/PESAS.PRG manually"

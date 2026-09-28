@@ -90,7 +90,7 @@ el descanso del reloj es una cuenta atrás que vibra al acabar; sin él, el desc
 La tarea "Plan de la semana" usa 120 s en básicos y 75 s en accesorios. Requiere un reloj con perfil
 de Fuerza (el Forerunner 55 no lo tiene; el 165 sí).
 
-## App de reloj "Pesas" (28/09/2026)
+## App de reloj "Gym" (28/09/2026, antes "Pesas")
 
 Forerunner 55 no tiene perfil de Fuerza, así que hay una app Connect IQ propia en `watch-app/`.
 
@@ -111,3 +111,10 @@ Compilar e instalar (reloj conectado por USB, SDK Connect IQ 9.2.0 y dispositivo
 ```bash
 cd watch-app && ./build.sh fr55     # o fr165 para el Forerunner 165
 ```
+
+### Diseño v2 (28/09/2026)
+Blanco y negro, mínimo. START empieza / marca serie hecha / confirma; tras cada serie se anotan
+REPS y KG (UP/DOWN cambian el campo resaltado, START pasa al siguiente); descanso con cuenta atrás que
+vibra; BACK = pausa (Seguir, Guardar, Saltar ejercicio, Descartar). Un servicio en segundo plano
+descarga el plan de hoy cada hora cuando el reloj está conectado al móvil, así funciona sin móvil en el
+gimnasio. Las peticiones envían la fecha local del reloj.
