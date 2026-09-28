@@ -52,7 +52,7 @@ MAX_LOGS = 30
 _logs: dict[str, dict[str, Any]] = {}
 # Coach note for the watch face: {"date": "YYYY-MM-DD", "text": "..."}.
 _note: dict[str, str] = {}
-NOTE_MAX = 60
+NOTE_MAX = 40
 _tasks: set[asyncio.Task[None]] = set()
 
 
@@ -437,12 +437,12 @@ async def watch_face(request: Request) -> Response:
 async def set_watch_note(text: str, date: str | None = None) -> dict[str, Any]:
     """Write the one-line coach note shown on the user's "Coach" watch face today.
 
-    Keep it short and actionable (max 60 characters, no emojis), e.g.
-    "Dormiste 6 h: hoy rodaje suave" or "11 dias sin pierna: hoy Legs".
+    Keep it short and actionable (max 40 characters, no emojis, no accents), e.g.
+    "Dormiste 6 h: hoy rodaje suave" or "11 dias sin pierna: toca Legs".
     The watch face refreshes about every 30 minutes while connected to the phone.
 
     Args:
-        text: The note. Longer text is cut to 60 characters.
+        text: The note. Longer text is cut to 40 characters.
         date: YYYY-MM-DD the note is for. Defaults to today.
     """
     day = _s._normalise_date(date, _s._today_iso())

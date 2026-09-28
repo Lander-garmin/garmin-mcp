@@ -336,6 +336,6 @@ async def test_face_endpoint_and_note(keyed: str) -> None:
         r2 = await http.get("/watch/face", params={"k": keyed, "date": day})
         r3 = await http.get("/watch/face", params={"k": keyed, "date": "2026-10-01"})
     assert r1.json() == {"ok": True, "date": day, "items": ["17:30 Gym Push 70 min"]}
-    assert res["text"].startswith("Dormiste 6 h: hoy suave") and len(res["text"]) == 60
+    assert res["text"].startswith("Dormiste 6 h: hoy suave") and len(res["text"]) == 40
     assert r2.json()["note"] == res["text"]
     assert "note" not in r3.json()  # a note is only shown on its own day
