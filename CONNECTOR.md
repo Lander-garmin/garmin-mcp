@@ -89,3 +89,25 @@ Comprobar tras el despliegue: `curl -s https://svc-sync-eu-2609.onrender.com/hea
 el descanso del reloj es una cuenta atrás que vibra al acabar; sin él, el descanso termina con Lap.
 La tarea "Plan de la semana" usa 120 s en básicos y 75 s en accesorios. Requiere un reloj con perfil
 de Fuerza (el Forerunner 55 no lo tiene; el 165 sí).
+
+## App de reloj "Pesas" (28/09/2026)
+
+Forerunner 55 no tiene perfil de Fuerza, así que hay una app Connect IQ propia en `watch-app/`.
+
+- Lee el entreno de fuerza programado hoy en el calendario de Garmin (`GET /watch/today`), ofrece
+  "Realizar / Ver / Sesión libre", guía serie a serie (Up/Down ajustan kg; en el descanso, las
+  repeticiones), descanso con cuenta atrás que vibra, y graba "Entrenamiento de fuerza" con una
+  vuelta por serie (campos ejercicio, repeticiones, peso).
+- Al guardar envía las series a `POST /watch/log`; el servidor espera a que la actividad aparezca
+  en Garmin Connect y le escribe las series, el título y un resumen en la descripción
+  (`update_strength_activity`). Estado consultable con la herramienta `get_watch_strength_logs`.
+- Strava recibe la actividad (nombre, tiempo, pulso) pero no la lista de ejercicios: Garmin la
+  envía antes de que se añadan las series y la API de Strava es de pago.
+- Clave del reloj = HMAC(JWT_SECRET, "watch-api")[:32]; se genera en `watch-app/source/Secrets.mc`
+  (no versionado). Si se rota `JWT_SECRET`, recompilar e instalar la app.
+
+Compilar e instalar (reloj conectado por USB, SDK Connect IQ 9.2.0 y dispositivo fr55 instalados):
+
+```bash
+cd watch-app && ./build.sh fr55     # o fr165 para el Forerunner 165
+```
