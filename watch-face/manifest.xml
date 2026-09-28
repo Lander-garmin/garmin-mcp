@@ -1,6 +1,6 @@
 <?xml version="1.0"?>
 <iq:manifest version="3" xmlns:iq="http://www.garmin.com/xml/connectiq">
-    <iq:application id="9040a9439b4d41a287640dd925991db3" type="watchface" name="@Strings.AppName" entry="CoachApp" launcherIcon="@Drawables.LauncherIcon" minApiLevel="3.3.0">
+    <iq:application id="6ece4dbb9d164a6a905c3945bd038986" type="widget" name="@Strings.AppName" entry="CoachApp" launcherIcon="@Drawables.LauncherIcon" minApiLevel="3.0.0">
         <iq:products>
             <iq:product id="fr55"/>
             <iq:product id="fr165"/>

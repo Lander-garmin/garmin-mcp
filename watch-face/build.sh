@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build the "Coach" watch face and install it on a watch connected by USB.
+# Build the "Coach" widget and install it on a watch connected by USB.
 # Usage: ./build.sh [device]   (default fr55)
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -31,9 +31,10 @@ echo "built bin/Coach.prg for $DEVICE"
 
 for drive in /d /e /f /g; do
   if [ -d "$drive/GARMIN/APPS" ]; then
-    cp bin/Coach.prg "$drive/GARMIN/APPS/COACH.PRG"
-    echo "installed to $drive/GARMIN/APPS/COACH.PRG - unplug the watch, then pick the 'Coach' watch face"
+    rm -f "$drive/GARMIN/APPS/COACH.PRG"   # old watch-face build, replaced by the widget
+    cp bin/Coach.prg "$drive/GARMIN/APPS/COACHW.PRG"
+    echo "installed to $drive/GARMIN/APPS/COACHW.PRG - unplug the watch; the Coach widget appears with UP/DOWN"
     exit 0
   fi
 done
-echo "watch not connected: bin/Coach.prg is ready to copy to GARMIN/APPS/COACH.PRG"
+echo "watch not connected: bin/Coach.prg is ready to copy to GARMIN/APPS/COACHW.PRG"

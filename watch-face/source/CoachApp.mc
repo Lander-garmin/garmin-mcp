@@ -4,9 +4,10 @@ import Toybox.Lang;
 import Toybox.Time;
 import Toybox.WatchUi;
 
-// "Coach" watch face: time, today's sessions from the Garmin calendar, Body
-// Battery and a one-line note written by the Claude coach every morning.
-// A background service refreshes the data every 30 minutes via the phone.
+// "Coach" widget (UP/DOWN from the watch face): today's sessions from the
+// Garmin calendar, Body Battery and a one-line note from the Claude coach.
+// Refreshes when opened and every 30 minutes in the background via the phone.
+// Every risky call is guarded so the widget never shows the Connect IQ error.
 (:background)
 class CoachApp extends Application.AppBase {
     function initialize() {
@@ -14,12 +15,10 @@ class CoachApp extends Application.AppBase {
     }
 
     function getInitialView() {
-        var cached = Application.Storage.getValue("face");
-        if (cached instanceof Dictionary && faceDate().equals(cached["date"])) {
+        try {
             Background.registerForTemporalEvent(new Time.Duration(30 * 60));
-        } else {
-            // Nothing for today yet: ask as soon as the system allows.
-            Background.registerForTemporalEvent(Time.now());
+        } catch (e) {
+            // Background refresh is a nice-to-have; the widget also fetches on open.
         }
         return [new CoachView()];
     }
@@ -29,10 +28,14 @@ class CoachApp extends Application.AppBase {
     }
 
     function onBackgroundData(data) {
-        if (data instanceof Dictionary && data["ok"] == true) {
-            Application.Storage.setValue("face", data);
-        }
-        Background.registerForTemporalEvent(new Time.Duration(30 * 60));
+        storeFace(data);
         WatchUi.requestUpdate();
+    }
+}
+
+(:background)
+function storeFace(data) {
+    if (data instanceof Dictionary && data["ok"] == true && data["date"] instanceof String) {
+        Application.Storage.setValue("face", data);
     }
 }
