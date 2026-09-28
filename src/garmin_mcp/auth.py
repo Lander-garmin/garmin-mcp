@@ -4,15 +4,30 @@ Single-user model: one shared password (set via ``MCP_AUTH_PASSWORD``) gates
 every authorisation. Tokens are JWTs signed with ``JWT_SECRET``. Refresh
 tokens rotate on every use.
 
-This intentionally trades durability for simplicity: clients, codes, and
-refresh tokens live in process memory and disappear on restart. Access
-tokens survive restarts because they are stateless JWTs. For a single-user
-personal server this is fine: the user simply re-authorises every cold
-start of the OAuth flow.
+Restart-safe: hosts like Render restart the process on every deploy and at
+will, so nothing a connected client depends on may live only in memory.
+
+* **Client registrations are stateless.** The ``client_id`` handed back by
+  Dynamic Client Registration is a signed token that carries the client's
+  registration metadata, and the client secret is derived from it with an
+  HMAC. After a restart ``get_client`` rebuilds the client from its id.
+* **Refresh tokens are signed JWTs** (``typ=refresh``) bound to the client.
+  A restart no longer invalidates them, so the connector does not drop when
+  the 24 h access token expires. Rotation is enforced best-effort with an
+  in-memory list of spent refresh-token ids.
+* Authorisation codes and pending logins stay in memory: they live for
+  minutes and are only needed while the user is on the login page.
+
+Rotating ``JWT_SECRET`` invalidates every client, access and refresh token at
+once, which is the documented way to revoke access.
 """
 
 from __future__ import annotations
 
+import base64
+import hashlib
+import hmac
+import json
 import secrets
 import time
 from typing import Any
@@ -32,9 +47,29 @@ from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
 log = structlog.get_logger(__name__)
 
 ACCESS_TOKEN_TTL_SECONDS = 24 * 60 * 60
-REFRESH_TOKEN_TTL_SECONDS = 30 * 24 * 60 * 60
+REFRESH_TOKEN_TTL_SECONDS = 90 * 24 * 60 * 60
 AUTHORIZATION_CODE_TTL_SECONDS = 10 * 60
 LOGIN_STATE_TTL_SECONDS = 10 * 60
+
+_CLIENT_ID_PREFIX = "c1."
+_REFRESH_AUDIENCE_SUFFIX = "#refresh"
+# Registration fields carried inside a stateless client_id.
+_CLIENT_FIELDS = {
+    "redirect_uris",
+    "token_endpoint_auth_method",
+    "grant_types",
+    "response_types",
+    "scope",
+    "client_name",
+}
+
+
+def _b64e(raw: bytes) -> str:
+    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
+
+
+def _b64d(text: str) -> bytes:
+    return base64.urlsafe_b64decode(text + "=" * (-len(text) % 4))
 
 
 class InvalidLoginError(Exception):
@@ -55,26 +90,91 @@ class SimpleOAuthProvider(
         self._jwt_secret = jwt_secret
         self._issuer_url = issuer_url.rstrip("/")
 
+        # Cache only: every entry can be rebuilt from its signed client_id.
         self._clients: dict[str, OAuthClientInformationFull] = {}
         self._codes: dict[str, AuthorizationCode] = {}
-        self._refresh_tokens: dict[str, RefreshToken] = {}
+        # jti -> exp of refresh tokens already exchanged (rotation, best-effort).
+        self._spent_refresh_jtis: dict[str, int] = {}
         # state -> (client_id, params, created_at)
         self._pending_logins: dict[str, tuple[str, AuthorizationParams, float]] = {}
 
+    # ------------------------------------------------------------------
+    # Stateless client registrations
+    # ------------------------------------------------------------------
+
+    def _mac(self, purpose: bytes, data: bytes) -> bytes:
+        return hmac.new(self._jwt_secret.encode(), purpose + b"|" + data, hashlib.sha256).digest()
+
+    def _client_secret_for(self, client_id: str) -> str:
+        return self._mac(b"client-secret", client_id.encode()).hex()
+
+    def _encode_client_id(self, client_info: OAuthClientInformationFull) -> str:
+        meta: dict[str, Any] = client_info.model_dump(
+            mode="json", include=_CLIENT_FIELDS, exclude_none=True
+        )
+        if isinstance(meta.get("client_name"), str):
+            meta["client_name"] = meta["client_name"][:60]
+        meta["iat"] = client_info.client_id_issued_at or int(time.time())
+        body = _b64e(json.dumps(meta, separators=(",", ":"), sort_keys=True).encode())
+        sig = _b64e(self._mac(b"client-id", body.encode())[:18])
+        return f"{_CLIENT_ID_PREFIX}{body}.{sig}"
+
+    def _decode_client_id(self, client_id: str) -> OAuthClientInformationFull | None:
+        if not client_id.startswith(_CLIENT_ID_PREFIX):
+            return None
+        try:
+            body, sig = client_id[len(_CLIENT_ID_PREFIX) :].rsplit(".", 1)
+        except ValueError:
+            return None
+        expected = _b64e(self._mac(b"client-id", body.encode())[:18])
+        if not hmac.compare_digest(sig, expected):
+            return None
+        try:
+            meta: dict[str, Any] = json.loads(_b64d(body))
+        except ValueError:
+            return None
+        issued_at = meta.pop("iat", None)
+        method = meta.get("token_endpoint_auth_method")
+        try:
+            return OAuthClientInformationFull(
+                client_id=client_id,
+                client_id_issued_at=issued_at,
+                client_secret=None if method == "none" else self._client_secret_for(client_id),
+                **meta,
+            )
+        except ValueError:
+            return None
+
     async def get_client(self, client_id: str) -> OAuthClientInformationFull | None:
-        return self._clients.get(client_id)
+        client = self._clients.get(client_id)
+        if client is None:
+            client = self._decode_client_id(client_id)
+            if client is not None:
+                self._clients[client_id] = client
+                log.info("oauth.client.restored")
+        return client
 
     async def register_client(self, client_info: OAuthClientInformationFull) -> None:
-        client_id = client_info.client_id
-        if client_id is None:
+        if client_info.client_id is None:
             raise ValueError("Registered client must have a client_id assigned by the SDK.")
+        # Replace the SDK's random UUID with a signed, self-describing id and a
+        # derived secret. The SDK returns this same object to the client, so the
+        # client stores these values and they keep working across restarts.
+        client_id = self._encode_client_id(client_info)
+        client_info.client_id = client_id
+        if client_info.token_endpoint_auth_method != "none":
+            client_info.client_secret = self._client_secret_for(client_id)
         self._clients[client_id] = client_info
         log.info(
             "oauth.client.registered",
-            client_id=client_id,
+            client_id=client_id[:24] + "...",
             client_name=client_info.client_name,
             redirect_uris=[str(u) for u in (client_info.redirect_uris or [])],
         )
+
+    # ------------------------------------------------------------------
+    # Authorisation (password page)
+    # ------------------------------------------------------------------
 
     async def authorize(
         self,
@@ -150,13 +250,7 @@ class SimpleOAuthProvider(
             authorization_code.scopes,
             authorization_code.resource,
         )
-        refresh_value = secrets.token_urlsafe(32)
-        self._refresh_tokens[refresh_value] = RefreshToken(
-            token=refresh_value,
-            client_id=client_id,
-            scopes=authorization_code.scopes,
-            expires_at=int(time.time()) + REFRESH_TOKEN_TTL_SECONDS,
-        )
+        refresh_value = self._mint_refresh(client_id, authorization_code.scopes)
         return OAuthToken(
             access_token=access_token,
             token_type="Bearer",
@@ -165,18 +259,37 @@ class SimpleOAuthProvider(
             scope=" ".join(authorization_code.scopes) if authorization_code.scopes else None,
         )
 
+    # ------------------------------------------------------------------
+    # Refresh tokens (stateless JWTs)
+    # ------------------------------------------------------------------
+
     async def load_refresh_token(
         self,
         client: OAuthClientInformationFull,
         refresh_token: str,
     ) -> RefreshToken | None:
-        rt = self._refresh_tokens.get(refresh_token)
-        if rt is None or rt.client_id != client.client_id:
+        try:
+            payload: dict[str, Any] = jwt.decode(
+                refresh_token,
+                self._jwt_secret,
+                algorithms=["HS256"],
+                audience=self._issuer_url + _REFRESH_AUDIENCE_SUFFIX,
+                issuer=self._issuer_url,
+            )
+        except jwt.PyJWTError as exc:
+            log.info("oauth.refresh_token.invalid", error=str(exc))
             return None
-        if rt.expires_at is not None and rt.expires_at <= int(time.time()):
-            self._refresh_tokens.pop(refresh_token, None)
+        if payload.get("typ") != "refresh" or payload.get("sub") != client.client_id:
             return None
-        return rt
+        if payload.get("jti") in self._spent_refresh_jtis:
+            log.info("oauth.refresh_token.reused")
+            return None
+        return RefreshToken(
+            token=refresh_token,
+            client_id=str(payload["sub"]),
+            scopes=list(payload.get("scopes", [])),
+            expires_at=int(payload["exp"]),
+        )
 
     async def exchange_refresh_token(
         self,
@@ -184,19 +297,14 @@ class SimpleOAuthProvider(
         refresh_token: RefreshToken,
         scopes: list[str],
     ) -> OAuthToken:
-        # Rotation: invalidate the presented refresh token immediately.
+        # Rotation: mark the presented refresh token as spent.
         client_id = self._require_client_id(client)
-        self._refresh_tokens.pop(refresh_token.token, None)
+        self._spend_refresh(refresh_token)
 
         new_scopes = scopes or refresh_token.scopes
         access_token = self._mint_jwt(client_id, new_scopes, None)
-        new_refresh = secrets.token_urlsafe(32)
-        self._refresh_tokens[new_refresh] = RefreshToken(
-            token=new_refresh,
-            client_id=client_id,
-            scopes=new_scopes,
-            expires_at=int(time.time()) + REFRESH_TOKEN_TTL_SECONDS,
-        )
+        new_refresh = self._mint_refresh(client_id, new_scopes)
+        log.info("oauth.refresh_token.rotated")
         return OAuthToken(
             access_token=access_token,
             token_type="Bearer",
@@ -204,6 +312,10 @@ class SimpleOAuthProvider(
             refresh_token=new_refresh,
             scope=" ".join(new_scopes) if new_scopes else None,
         )
+
+    # ------------------------------------------------------------------
+    # Access tokens
+    # ------------------------------------------------------------------
 
     async def load_access_token(self, token: str) -> AccessToken | None:
         try:
@@ -217,6 +329,8 @@ class SimpleOAuthProvider(
         except jwt.PyJWTError as exc:
             log.debug("oauth.access_token.invalid", error=str(exc))
             return None
+        if payload.get("typ") == "refresh":
+            return None
 
         return AccessToken(
             token=token,
@@ -228,10 +342,14 @@ class SimpleOAuthProvider(
 
     async def revoke_token(self, token: AccessToken | RefreshToken) -> None:
         if isinstance(token, RefreshToken):
-            self._refresh_tokens.pop(token.token, None)
+            self._spend_refresh(token)
         # Access tokens are stateless JWTs. We accept the revoke call so the
         # endpoint reports success, but the token will continue to validate
         # until it expires. For a single-user server this is acceptable.
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
 
     def _mint_jwt(
         self,
@@ -252,6 +370,34 @@ class SimpleOAuthProvider(
             payload["resource"] = resource
         encoded = jwt.encode(payload, self._jwt_secret, algorithm="HS256")
         return encoded if isinstance(encoded, str) else encoded.decode("ascii")
+
+    def _mint_refresh(self, client_id: str, scopes: list[str]) -> str:
+        now = int(time.time())
+        payload: dict[str, Any] = {
+            "typ": "refresh",
+            "sub": client_id,
+            "iss": self._issuer_url,
+            "aud": self._issuer_url + _REFRESH_AUDIENCE_SUFFIX,
+            "iat": now,
+            "exp": now + REFRESH_TOKEN_TTL_SECONDS,
+            "jti": secrets.token_urlsafe(12),
+            "scopes": scopes or [],
+        }
+        encoded = jwt.encode(payload, self._jwt_secret, algorithm="HS256")
+        return encoded if isinstance(encoded, str) else encoded.decode("ascii")
+
+    def _spend_refresh(self, token: RefreshToken) -> None:
+        try:
+            payload = jwt.decode(token.token, options={"verify_signature": False})
+        except jwt.PyJWTError:
+            return
+        jti = payload.get("jti")
+        if jti:
+            self._spent_refresh_jtis[str(jti)] = int(payload.get("exp", 0))
+        now = int(time.time())
+        for spent, exp in list(self._spent_refresh_jtis.items()):
+            if exp and exp < now:
+                self._spent_refresh_jtis.pop(spent, None)
 
     @staticmethod
     def _require_client_id(client: OAuthClientInformationFull) -> str:
