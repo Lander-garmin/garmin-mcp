@@ -220,7 +220,10 @@ async def test_log_is_applied_to_matching_activity(
         bad = await http.post("/watch/log", params={"k": keyed}, content=b'{"start":1,"sets":[]}')
         assert bad.status_code == 400
         r = await http.post("/watch/log", params={"k": keyed}, content=json.dumps(body))
+        again = await http.post("/watch/log", params={"k": keyed}, content=json.dumps(body))
     assert r.status_code == 200 and r.json()["ok"]
+    assert again.json()["dup"] is True and again.json()["id"] == r.json()["id"]
+    assert len(watch_api._logs) == 1
     for _ in range(50):
         await asyncio.sleep(0.01)
         if watch_api._logs[r.json()["id"]]["status"] == "applied":
@@ -275,3 +278,19 @@ async def test_apply_falls_back_to_description_when_sets_rejected(keyed: str) ->
 def test_watch_routes_registered() -> None:
     paths = {getattr(r, "path", None) for r in server_module.mcp._custom_starlette_routes}
     assert {"/watch/today", "/watch/log"} <= paths
+
+
+def test_match_window_is_tight() -> None:
+    start = int(dt.datetime(2026, 9, 30, 15, 30, tzinfo=dt.UTC).timestamp())
+    near = {
+        "activityId": 1,
+        "startTimeGMT": "2026-09-30 15:31:30",
+        "activityType": {"typeKey": "strength_training"},
+    }
+    far = {
+        "activityId": 2,
+        "startTimeGMT": "2026-09-30 15:40:00",
+        "activityType": {"typeKey": "strength_training"},
+    }
+    assert watch_api._find_activity([far, near], start) == near
+    assert watch_api._find_activity([far], start) is None

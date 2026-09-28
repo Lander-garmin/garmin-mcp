@@ -42,7 +42,10 @@ log: Any = vars(_s)["log"]
 
 APPLY_RETRY_SECONDS = 120
 APPLY_MAX_SECONDS = 3 * 60 * 60
-MATCH_WINDOW_SECONDS = 20 * 60
+# The app's session start and Garmin's startTimeGMT come from the same watch
+# clock, so a real match is within seconds. Keep the window tight so a test log
+# (e.g. from the simulator, never uploaded) cannot grab a real session.
+MATCH_WINDOW_SECONDS = 3 * 60
 MAX_SETS = 120
 MAX_LOGS = 30
 
@@ -339,6 +342,11 @@ async def watch_log(request: Request) -> Response:
         start = int(data["start"])
     except (ValueError, KeyError, TypeError) as exc:
         return JSONResponse({"ok": False, "error": str(exc)[:120]}, status_code=400)
+    # The app re-sends a session it could not confirm (e.g. it was closed while
+    # sending). Treat the same start + same number of sets as the same log.
+    for existing in _logs.values():
+        if existing["start"] == start and len(existing["sets"]) == len(sets):
+            return JSONResponse({"ok": True, "id": existing["id"], "sets": len(sets), "dup": True})
     log_id = secrets.token_hex(6)
     _logs[log_id] = {
         "id": log_id,

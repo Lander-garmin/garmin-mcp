@@ -5,11 +5,11 @@ import Toybox.WatchUi;
 // "Entreno de hoy": the same choice the watch offers for a scheduled run.
 class PlanMenu extends WatchUi.Menu2 {
     function initialize() {
-        Menu2.initialize({:title => "Entreno de hoy"});
+        Menu2.initialize({:title => "Hoy"});
         var m = getModel();
         addItem(new WatchUi.MenuItem("Realizar entreno", m.shortName(), :realizar, {}));
         addItem(new WatchUi.MenuItem("Ver entreno", m.ex.size().format("%d") + " ejercicios", :ver, {}));
-        addItem(new WatchUi.MenuItem("Sesion libre", "Sin plan", :libre, {}));
+        addItem(new WatchUi.MenuItem("Sesion libre", "Sin plan del dia", :libre, {}));
     }
 }
 
@@ -74,7 +74,7 @@ class PlanDetailDelegate extends WatchUi.Menu2InputDelegate {
 // Hold UP during the session.
 class SessionMenu extends WatchUi.Menu2 {
     function initialize() {
-        Menu2.initialize({:title => "Sesion"});
+        Menu2.initialize({:title => "Gym"});
         addItem(new WatchUi.MenuItem("Continuar", null, :cont, {}));
         addItem(new WatchUi.MenuItem("Siguiente ejercicio", null, :skip, {}));
         addItem(new WatchUi.MenuItem("Terminar y guardar", null, :save, {}));

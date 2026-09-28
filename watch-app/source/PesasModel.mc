@@ -8,6 +8,7 @@ import Toybox.Lang;
 import Toybox.Sensor;
 import Toybox.System;
 import Toybox.Time;
+import Toybox.Time.Gregorian;
 import Toybox.Timer;
 import Toybox.WatchUi;
 
@@ -48,6 +49,7 @@ class PesasModel {
     var timer = null;
     var sendStatus = "";
     var freeSession = false;
+    var finalElapsed = 0;
 
     function initialize() {
     }
@@ -74,46 +76,68 @@ class PesasModel {
         if (code == 200 && data != null && data["ok"] == true) {
             if (data.hasKey("none")) {
                 state = ST_NOPLAN;
-                message = "Hoy no hay pesas en el calendario";
+                message = "Hoy no hay gym en el calendario";
             } else {
-                plan = data;
-                ex = data["ex"];
-                if (ex == null || ex.size() == 0) {
-                    state = ST_NOPLAN;
-                    message = "El entreno de hoy no tiene ejercicios";
-                } else {
-                    state = ST_READY;
-                    WatchUi.pushView(new PlanMenu(), new PlanMenuDelegate(), WatchUi.SLIDE_IMMEDIATE);
-                }
+                Application.Storage.setValue("plan", data);
+                usePlan(data, "");
             }
         } else {
-            state = ST_ERROR;
-            message = "Sin conexion (" + code.toString() + ")";
+            // No phone / no signal: use today's plan if it was downloaded earlier.
+            var cached = Application.Storage.getValue("plan");
+            if (cached != null && todayIso().equals(cached["date"])) {
+                usePlan(cached, "Sin movil: entreno guardado");
+            } else {
+                state = ST_ERROR;
+                message = "Sin conexion con el movil";
+            }
         }
         WatchUi.requestUpdate();
     }
 
+    function usePlan(data, note) {
+        plan = data;
+        ex = data["ex"];
+        message = note;
+        if (ex == null || ex.size() == 0) {
+            state = ST_NOPLAN;
+            message = "El entreno de hoy no tiene ejercicios";
+            return;
+        }
+        state = ST_READY;
+        WatchUi.pushView(new PlanMenu(), new PlanMenuDelegate(), WatchUi.SLIDE_IMMEDIATE);
+    }
+
+    function todayIso() {
+        var d = Gregorian.info(Time.now(), Time.FORMAT_SHORT);
+        return d.year.format("%04d") + "-" + d.month.format("%02d") + "-" + d.day.format("%02d");
+    }
+
     function planName() {
         if (plan == null) {
-            return "Sesion libre";
+            return "Gym libre";
         }
         return plan["name"];
     }
 
-    // "Plan X 30/09 Pesas Push 70 min" -> "Pesas Push"
+    // "Plan X 30/09 Gym Push 70 min" (or "... Pesas Push ...") -> "Gym Push"
     function shortName() {
         var n = planName();
-        var i = n.find("Pesas");
+        var i = n.find("Gym ");
+        var skip = 4;
         if (i == null) {
-            return "Pesas";
+            i = n.find("Pesas ");
+            skip = 6;
         }
-        var rest = n.substring(i + 6, n.length());
-        if (rest == null || rest.length() == 0) {
-            return "Pesas";
+        if (i == null) {
+            return "Gym";
         }
+        var rest = n.substring(i + skip, n.length());
         var sp = rest.find(" ");
         var word = (sp == null) ? rest : rest.substring(0, sp);
-        var name = "Pesas " + word;
+        if (word.length() == 0) {
+            return "Gym";
+        }
+        var name = "Gym " + word;
         return name.length() > 15 ? name.substring(0, 15) : name;
     }
 
@@ -172,7 +196,7 @@ class PesasModel {
 
     function elapsed() {
         if (session == null) {
-            return 0;
+            return finalElapsed;
         }
         return (System.getTimer() - sessionStartMs) / 1000;
     }
@@ -315,6 +339,7 @@ class PesasModel {
 
     function save() {
         writeLap();
+        finalElapsed = elapsed();
         stopTimer();
         if (session != null) {
             session.stop();
