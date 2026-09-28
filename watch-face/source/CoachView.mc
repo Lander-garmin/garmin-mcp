@@ -51,7 +51,7 @@ class CoachView extends WatchUi.View {
         try {
             draw(dc, cx, h);
         } catch (e) {
-            txt(dc, cx, h / 2, Graphics.FONT_SMALL, "Coach");
+            txt(dc, cx, h / 2, Graphics.FONT_SMALL, "Trainer");
         }
     }
 
@@ -79,7 +79,10 @@ class CoachView extends WatchUi.View {
         dc.drawLine(cx - 50, h * 0.58, cx + 50, h * 0.58);
 
         if (today && face.hasKey("note") && face["note"] instanceof String) {
-            note(dc, cx, h * 0.70, face["note"]);
+            note(dc, cx, h * 0.63, face["note"]);
+        }
+        if (status.equals("") && todayMessages().size() > 0) {
+            txt(dc, cx, h * 0.87, Graphics.FONT_XTINY, "START mensajes");
         }
         if (!status.equals("")) {
             txt(dc, cx, h * 0.88, Graphics.FONT_XTINY, status);

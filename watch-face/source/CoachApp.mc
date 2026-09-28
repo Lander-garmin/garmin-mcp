@@ -4,7 +4,7 @@ import Toybox.Lang;
 import Toybox.Time;
 import Toybox.WatchUi;
 
-// "Coach" widget (UP/DOWN from the watch face): today's sessions from the
+// "Trainer" widget (UP/DOWN from the watch face): today's sessions from the
 // Garmin calendar, Body Battery and a one-line note from the Claude coach.
 // Refreshes when opened and every 30 minutes in the background via the phone.
 // Every risky call is guarded so the widget never shows the Connect IQ error.
@@ -16,7 +16,7 @@ class CoachApp extends Application.AppBase {
 
     function getInitialView() {
         scheduleRefresh();
-        return [new CoachView()];
+        return [new CoachView(), new CoachDelegate()];
     }
 
     function getServiceDelegate() {

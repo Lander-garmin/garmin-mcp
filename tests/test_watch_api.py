@@ -339,3 +339,35 @@ async def test_face_endpoint_and_note(keyed: str) -> None:
     assert res["text"].startswith("Dormiste 6 h: hoy suave") and len(res["text"]) == 40
     assert r2.json()["note"] == res["text"]
     assert "note" not in r3.json()  # a note is only shown on its own day
+
+
+@pytest.mark.asyncio
+async def test_watch_messages_in_face(keyed: str) -> None:
+    watch_api._messages.clear()
+    watch_api._note.clear()
+    fake = FakeGarminClient({"get_scheduled_workouts": {"calendarItems": []}})
+    server_module.set_garmin_client_for_testing(fake)
+    await watch_api.set_watch_message(
+        "morning", "Dormiste 7 h 40.\n\nHoy: Gym Push\nBanca 82,5 kg ✅", date="2026-09-30"
+    )
+    await watch_api.set_watch_message("evening", "Buen dia", date="2026-09-29")
+    await watch_api.set_watch_message(
+        "week", "M 29: Rodaje suave\nX 30: Gym Push", date="2026-09-27"
+    )
+    body = await watch_api.face_data("2026-09-30")
+    assert body["msgs"]["morning"] == "Dormiste 7 h 40.\n\nHoy: Gym Push\nBanca 82,5 kg"
+    assert "evening" not in body["msgs"]  # yesterday's summary is not shown
+    assert body["msgs"]["week"].startswith("M 29")
+    later = await watch_api.face_data("2026-10-05")
+    assert "msgs" not in later  # week plan expires after 7 days
+    with pytest.raises(ValueError):
+        await watch_api.set_watch_message("lunch", "x")
+    long = await watch_api.set_watch_message("morning", "a" * 2000, date="2026-09-30")
+    assert long["chars"] == 600
+
+
+def test_watch_text_strips_accents_and_emojis() -> None:
+    assert (
+        watch_api.watch_text("Sesión fácil 💪\r\n\n\n  Mañana: pierna  ")
+        == "Sesion facil\n\nManana: pierna"
+    )

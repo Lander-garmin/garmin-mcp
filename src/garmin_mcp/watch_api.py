@@ -50,9 +50,13 @@ MAX_SETS = 120
 MAX_LOGS = 30
 
 _logs: dict[str, dict[str, Any]] = {}
-# Coach note for the watch face: {"date": "YYYY-MM-DD", "text": "..."}.
+# Coach note for the Trainer widget: {"date": "YYYY-MM-DD", "text": "..."}.
 _note: dict[str, str] = {}
 NOTE_MAX = 40
+# Longer coach messages readable inside the Trainer widget (START on the watch).
+# kind -> {"date": "YYYY-MM-DD", "text": "..."}; "week" stays valid for 7 days.
+_messages: dict[str, dict[str, str]] = {}
+MESSAGE_KINDS = {"morning": 600, "evening": 600, "week": 900}
 _tasks: set[asyncio.Task[None]] = set()
 
 
@@ -347,7 +351,37 @@ async def face_data(date: str) -> dict[str, Any]:
     body: dict[str, Any] = {"ok": True, "date": date, "items": sorted(labels)[:3]}
     if _note.get("date") == date and _note.get("text"):
         body["note"] = _note["text"]
+    msgs = current_messages(date)
+    if msgs:
+        body["msgs"] = msgs
     return body
+
+
+def watch_text(text: str) -> str:
+    """Plain text the watch fonts can draw: no accents or emojis, tidy line breaks."""
+    import unicodedata
+
+    lines: list[str] = []
+    for raw in text.replace(chr(13), "").split(chr(10)):
+        flat = unicodedata.normalize("NFKD", raw).encode("ascii", "ignore").decode("ascii")
+        line = " ".join(flat.split())
+        if line or (lines and lines[-1]):
+            lines.append(line)
+    return chr(10).join(lines).strip()
+
+
+def current_messages(date: str) -> dict[str, str]:
+    """Messages to show today: morning/evening of this date, week plan of the last 7 days."""
+    out: dict[str, str] = {}
+    day = dt.date.fromisoformat(date)
+    for kind, msg in _messages.items():
+        msg_day = dt.date.fromisoformat(msg["date"])
+        if kind == "week":
+            if 0 <= (day - msg_day).days < 7:
+                out[kind] = msg["text"]
+        elif msg_day == day:
+            out[kind] = msg["text"]
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -435,11 +469,11 @@ async def watch_face(request: Request) -> Response:
 
 @mcp.tool()
 async def set_watch_note(text: str, date: str | None = None) -> dict[str, Any]:
-    """Write the one-line coach note shown on the user's "Coach" watch face today.
+    """Write the one-line coach note shown on the user's "Trainer" watch widget today.
 
     Keep it short and actionable (max 40 characters, no emojis, no accents), e.g.
     "Dormiste 6 h: hoy rodaje suave" or "11 dias sin pierna: toca Legs".
-    The watch face refreshes about every 30 minutes while connected to the phone.
+    The widget refreshes about every 30 minutes while the watch is connected to the phone.
 
     Args:
         text: The note. Longer text is cut to 40 characters.
@@ -451,3 +485,27 @@ async def set_watch_note(text: str, date: str | None = None) -> dict[str, Any]:
     _note.update({"date": day, "text": clean})
     log.info("watch.note.set", date=day, length=len(clean))
     return {"ok": True, "date": day, "text": clean}
+
+
+@mcp.tool()
+async def set_watch_message(kind: str, text: str, date: str | None = None) -> dict[str, Any]:
+    """Save a coach message the user can read on the watch (Trainer widget, START).
+
+    Use it at the end of each scheduled report with a condensed version for a
+    small round screen: short lines, no tables, no markdown, no emojis. Accents
+    are removed automatically.
+
+    Args:
+        kind: "morning" (Buenos dias, max 600 chars), "evening" (Resumen del dia,
+            max 600 chars) or "week" (Plan de la semana, max 900 chars; one line per
+            day, e.g. "M 30: Rodaje suave 45' Z2"). The week plan stays visible 7 days.
+        text: The message. Line breaks are kept; longer text is cut.
+        date: YYYY-MM-DD the message is for. Defaults to today.
+    """
+    if kind not in MESSAGE_KINDS:
+        raise ValueError(f"kind must be one of {sorted(MESSAGE_KINDS)}")
+    day = _s._normalise_date(date, _s._today_iso())
+    clean = watch_text(text)[: MESSAGE_KINDS[kind]]
+    _messages[kind] = {"date": day, "text": clean}
+    log.info("watch.message.set", kind=kind, date=day, length=len(clean))
+    return {"ok": True, "kind": kind, "date": day, "chars": len(clean)}
