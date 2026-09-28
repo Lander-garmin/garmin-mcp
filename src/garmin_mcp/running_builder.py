@@ -57,6 +57,12 @@ _END_ITER = {
 
 _TARGET_NONE = {"workoutTargetTypeId": 1, "workoutTargetTypeKey": "no.target", "displayOrder": 1}
 _TARGET_PACE = {"workoutTargetTypeId": 6, "workoutTargetTypeKey": "pace.zone", "displayOrder": 6}
+# Custom bpm range: heart.rate.zone with explicit values and no zoneNumber.
+_TARGET_HR = {
+    "workoutTargetTypeId": 4,
+    "workoutTargetTypeKey": "heart.rate.zone",
+    "displayOrder": 4,
+}
 
 # Sanity bounds for pace warnings (not errors): outside 2:00-15:00 min/km is
 # almost certainly a typo (e.g. '3:5' parsed as 3:05 when 3:50 was meant).
@@ -75,6 +81,21 @@ def parse_pace(pace: str) -> float:
     if seconds_per_km <= 0:
         raise ValueError(f"Invalid pace {pace!r}: pace must be positive.")
     return 1000.0 / seconds_per_km
+
+
+def _hr_bounds(step: RunningStepInput) -> tuple[int, int] | None:
+    """Validated (low, high) heart-rate target in bpm, or None."""
+    if step.hr_min_bpm is None and step.hr_max_bpm is None:
+        return None
+    if step.hr_min_bpm is None or step.hr_max_bpm is None:
+        raise ValueError(f"Step '{step.type}': provide both hr_min_bpm and hr_max_bpm, or neither.")
+    if step.hr_min_bpm >= step.hr_max_bpm:
+        raise ValueError(f"Step '{step.type}': hr_min_bpm must be lower than hr_max_bpm.")
+    if step.pace_min_per_km is not None or step.pace_max_per_km is not None:
+        raise ValueError(
+            f"Step '{step.type}': use either a pace target or a heart-rate target, not both."
+        )
+    return step.hr_min_bpm, step.hr_max_bpm
 
 
 def _pace_bounds(step: RunningStepInput) -> tuple[float, float] | None:
@@ -139,8 +160,13 @@ def _executable_step(step: RunningStepInput, order: int) -> dict[str, Any]:
         "endConditionValue": end_value,
         "targetType": _TARGET_NONE,
     }
+    hr = _hr_bounds(step)
     bounds = _pace_bounds(step)
-    if bounds is not None:
+    if hr is not None:
+        out["targetType"] = _TARGET_HR
+        out["targetValueOne"] = float(hr[0])
+        out["targetValueTwo"] = float(hr[1])
+    elif bounds is not None:
         slower, faster = bounds
         out["targetType"] = _TARGET_PACE
         out["targetValueOne"] = slower
@@ -262,6 +288,8 @@ def _fmt_step(step: RunningStepInput) -> str:
     text = f"{step.type.strip().lower()} {end}"
     if step.pace_min_per_km and step.pace_max_per_km:
         text += f" @ {step.pace_min_per_km}-{step.pace_max_per_km}/km"
+    if step.hr_min_bpm and step.hr_max_bpm:
+        text += f" @ {step.hr_min_bpm}-{step.hr_max_bpm} bpm"
     return text
 
 

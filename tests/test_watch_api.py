@@ -294,3 +294,48 @@ def test_match_window_is_tight() -> None:
     }
     assert watch_api._find_activity([far, near], start) == near
     assert watch_api._find_activity([far], start) is None
+
+
+def test_session_label_uses_usual_hours() -> None:
+    assert (
+        watch_api.session_label("Plan X 30/09 Gym Push 70 min", "2026-09-30")
+        == "17:30 Gym Push 70 min"
+    )
+    assert (
+        watch_api.session_label("Plan J 01/10 Rodaje suave 45 min", "2026-10-01")
+        == "18:30 Rodaje suave 45 min"
+    )
+    assert (
+        watch_api.session_label("Plan D 04/10 Tirada larga 16 km", "2026-10-04")
+        == "10:00 Tirada larga 16 km"
+    )
+
+
+@pytest.mark.asyncio
+async def test_face_endpoint_and_note(keyed: str) -> None:
+    watch_api._note.clear()
+    day = "2026-09-30"
+    fake = FakeGarminClient(
+        {
+            "get_scheduled_workouts": {
+                "calendarItems": [
+                    {"itemType": "workout", "date": day, "title": "Plan X 30/09 Gym Push 70 min"},
+                    {"itemType": "workout", "date": "2026-10-01", "title": "Plan J 01/10 Rodaje"},
+                    {"itemType": "activity", "date": day, "title": "Carrera"},
+                ]
+            }
+        }
+    )
+    server_module.set_garmin_client_for_testing(fake)
+    app = Starlette(routes=[Route("/watch/face", watch_api.watch_face, methods=["GET"])])
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://t") as http:
+        assert (await http.get("/watch/face", params={"date": day})).status_code == 401
+        r1 = await http.get("/watch/face", params={"k": keyed, "date": day})
+        res = await watch_api.set_watch_note("  Dormiste   6 h: hoy suave  " + "x" * 80, date=day)
+        r2 = await http.get("/watch/face", params={"k": keyed, "date": day})
+        r3 = await http.get("/watch/face", params={"k": keyed, "date": "2026-10-01"})
+    assert r1.json() == {"ok": True, "date": day, "items": ["17:30 Gym Push 70 min"]}
+    assert res["text"].startswith("Dormiste 6 h: hoy suave") and len(res["text"]) == 60
+    assert r2.json()["note"] == res["text"]
+    assert "note" not in r3.json()  # a note is only shown on its own day

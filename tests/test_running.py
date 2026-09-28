@@ -297,3 +297,51 @@ def test_unschedule_happy_path(monkeypatch: pytest.MonkeyPatch, fake: _FakeClien
     assert result.schedule_id == "555"
     assert "template is untouched" in result.status
     assert fake.called("unschedule_workout")
+
+
+def test_heart_rate_target_step() -> None:
+    from garmin_mcp.models import RunningWorkoutInput
+    from garmin_mcp.running_builder import build_running_workout, summarize
+
+    w = RunningWorkoutInput.model_validate(
+        {
+            "name": "Rodaje suave Z2",
+            "steps": [
+                {"type": "warmup", "duration_seconds": 600},
+                {"type": "active", "duration_seconds": 2700, "hr_min_bpm": 119, "hr_max_bpm": 139},
+                {"type": "cooldown", "duration_seconds": 300},
+            ],
+        }
+    )
+    steps = build_running_workout(w)["workoutSegments"][0]["workoutSteps"]
+    main = steps[1]
+    assert main["targetType"]["workoutTargetTypeKey"] == "heart.rate.zone"
+    assert (main["targetValueOne"], main["targetValueTwo"]) == (119.0, 139.0)
+    assert steps[0]["targetType"]["workoutTargetTypeKey"] == "no.target"
+    assert "119-139 bpm" in summarize(w)
+
+
+def test_heart_rate_target_validation() -> None:
+    import pytest as _pytest
+
+    from garmin_mcp.models import RunningWorkoutInput
+    from garmin_mcp.running_builder import build_running_workout
+
+    def build(step: dict) -> None:
+        build_running_workout(RunningWorkoutInput.model_validate({"name": "x", "steps": [step]}))
+
+    with _pytest.raises(ValueError, match="both hr_min_bpm"):
+        build({"type": "active", "duration_seconds": 60, "hr_min_bpm": 120})
+    with _pytest.raises(ValueError, match="lower than"):
+        build({"type": "active", "duration_seconds": 60, "hr_min_bpm": 140, "hr_max_bpm": 120})
+    with _pytest.raises(ValueError, match="not both"):
+        build(
+            {
+                "type": "active",
+                "duration_seconds": 60,
+                "hr_min_bpm": 119,
+                "hr_max_bpm": 139,
+                "pace_min_per_km": "5:30",
+                "pace_max_per_km": "6:00",
+            }
+        )

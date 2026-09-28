@@ -50,6 +50,9 @@ MAX_SETS = 120
 MAX_LOGS = 30
 
 _logs: dict[str, dict[str, Any]] = {}
+# Coach note for the watch face: {"date": "YYYY-MM-DD", "text": "..."}.
+_note: dict[str, str] = {}
+NOTE_MAX = 60
 _tasks: set[asyncio.Task[None]] = set()
 
 
@@ -313,6 +316,41 @@ def _validate_sets(raw: Any) -> list[dict[str, Any]]:
 
 
 # ---------------------------------------------------------------------------
+# Watch face: today's sessions + coach note
+# ---------------------------------------------------------------------------
+
+_PLAN_PREFIX_WORDS = 3  # "Plan", day letter, dd/mm
+
+
+def session_label(title: str, date: str) -> str:
+    """'Plan X 30/09 Gym Push 70 min' -> '17:30 Gym Push 70 min' (usual training hours)."""
+    words = title.split()
+    if len(words) > _PLAN_PREFIX_WORDS and words[0] == "Plan":
+        words = words[_PLAN_PREFIX_WORDS:]
+    label = " ".join(words)
+    weekend = dt.date.fromisoformat(date).weekday() >= 5
+    strength = label.startswith(("Gym", "Pesas"))
+    hour = "10:00" if weekend else ("17:30" if strength else "18:30")
+    return f"{hour} {label}"[:28]
+
+
+async def face_data(date: str) -> dict[str, Any]:
+    client = _s._get_garmin()
+    day = dt.date.fromisoformat(date)
+    calendar = await client.call("get_scheduled_workouts", day.year, day.month)
+    items = (calendar or {}).get("calendarItems") or []
+    labels = [
+        session_label(str(i.get("title") or "Entreno"), date)
+        for i in items
+        if i.get("itemType") == "workout" and i.get("date") == date
+    ]
+    body: dict[str, Any] = {"ok": True, "date": date, "items": sorted(labels)[:3]}
+    if _note.get("date") == date and _note.get("text"):
+        body["note"] = _note["text"]
+    return body
+
+
+# ---------------------------------------------------------------------------
 # Routes and tool
 # ---------------------------------------------------------------------------
 
@@ -379,3 +417,37 @@ async def get_watch_strength_logs() -> dict[str, Any]:
         "logs": sorted(_logs.values(), key=lambda r: r["received"], reverse=True),
         "note": "In-memory: cleared when the server restarts.",
     }
+
+
+@mcp.custom_route("/watch/face", methods=["GET"])  # type: ignore[untyped-decorator]
+async def watch_face(request: Request) -> Response:
+    if not _authorized(request):
+        return _deny()
+    date = request.query_params.get("date") or _s._today_iso()
+    try:
+        body = await face_data(dt.date.fromisoformat(date).isoformat())
+    except ValueError:
+        return JSONResponse({"ok": False, "error": "bad date"}, status_code=400)
+    except GarminClientError as exc:
+        return JSONResponse({"ok": False, "error": str(exc)[:120]}, status_code=502)
+    return JSONResponse(body)
+
+
+@mcp.tool()
+async def set_watch_note(text: str, date: str | None = None) -> dict[str, Any]:
+    """Write the one-line coach note shown on the user's "Coach" watch face today.
+
+    Keep it short and actionable (max 60 characters, no emojis), e.g.
+    "Dormiste 6 h: hoy rodaje suave" or "11 dias sin pierna: hoy Legs".
+    The watch face refreshes about every 30 minutes while connected to the phone.
+
+    Args:
+        text: The note. Longer text is cut to 60 characters.
+        date: YYYY-MM-DD the note is for. Defaults to today.
+    """
+    day = _s._normalise_date(date, _s._today_iso())
+    clean = " ".join(text.split())[:NOTE_MAX]
+    _note.clear()
+    _note.update({"date": day, "text": clean})
+    log.info("watch.note.set", date=day, length=len(clean))
+    return {"ok": True, "date": day, "text": clean}

@@ -577,6 +577,19 @@ class RunningStepInput(BaseModel):
         default=None,
         description="Slower (larger) pace bound as 'M:SS' per km, e.g. '4:45'.",
     )
+    hr_min_bpm: int | None = Field(
+        default=None,
+        ge=40,
+        le=230,
+        description=(
+            "Heart-rate target lower bound (bpm). With hr_max_bpm the watch alerts when the "
+            "runner leaves the range during this step (e.g. 119-139 for an easy Z2 run). "
+            "Use either a pace target or a heart-rate target on a step, not both."
+        ),
+    )
+    hr_max_bpm: int | None = Field(
+        default=None, ge=40, le=230, description="Heart-rate target upper bound (bpm)."
+    )
     note: str | None = Field(default=None, description="Optional note shown on the watch.")
 
 
