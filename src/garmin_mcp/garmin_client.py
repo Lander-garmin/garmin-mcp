@@ -119,9 +119,17 @@ _READ_METHODS: frozenset[str] = frozenset(
     }
 )
 # Deliberately minimal: create, delete, and calendar schedule/unschedule of
-# library workouts only. No activity or profile writes.
+# library workouts, plus one narrow activity write: attaching the performed
+# sets (and title/description) to a strength session recorded by the watch app
+# (see garmin_ext.ExtendedGarmin). No generic activity or profile writes.
 _WRITE_METHODS: frozenset[str] = frozenset(
-    {"upload_workout", "delete_workout", "schedule_workout", "unschedule_workout"}
+    {
+        "upload_workout",
+        "delete_workout",
+        "schedule_workout",
+        "unschedule_workout",
+        "update_strength_activity",
+    }
 )
 
 
@@ -154,7 +162,7 @@ class GarminClient:
             if self._client is not None and not force:
                 return self._client
 
-            from garminconnect import Garmin  # local import keeps tests light
+            from garmin_mcp.garmin_ext import ExtendedGarmin as Garmin  # local: keeps tests light
 
             self._token_dir.mkdir(parents=True, exist_ok=True)
             client = Garmin(email=self._email, password=self._password, return_on_mfa=False)

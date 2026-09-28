@@ -2315,6 +2315,7 @@ def run_http() -> None:
 # Register the extended read-only tool set. Imported last so it can reuse the
 # FastMCP instance, cache, client accessor and date helpers defined above.
 from garmin_mcp import extra_tools as _extra_tools  # noqa: E402,F401
+from garmin_mcp import watch_api as _watch_api  # noqa: E402,F401
 
 if __name__ == "__main__":
     # ``mcp dev src/garmin_mcp/server.py`` invokes this module via stdio.
