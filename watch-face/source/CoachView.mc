@@ -7,12 +7,15 @@ import Toybox.System;
 import Toybox.WatchUi;
 
 class CoachView extends WatchUi.View {
+    var status = "";   // "" | "Actualizando..." | "Sin conexion (code)"
+
     function initialize() {
         View.initialize();
     }
 
     // Fresh data every time the widget is opened (needs the phone).
     function onShow() {
+        status = "Actualizando...";
         try {
             Communications.makeWebRequest(
                 Secrets.SERVER_URL + "/watch/face",
@@ -30,8 +33,12 @@ class CoachView extends WatchUi.View {
     function onFace(code, data) {
         if (code == 200) {
             storeFace(data);
-            WatchUi.requestUpdate();
+            status = "";
+        } else {
+            // -104: no phone link, -300: timeout, 401/404/5xx: server side.
+            status = "Sin conexion (" + code.toString() + ")";
         }
+        WatchUi.requestUpdate();
     }
 
     function onUpdate(dc) {
@@ -72,8 +79,9 @@ class CoachView extends WatchUi.View {
 
         if (today && face.hasKey("note") && face["note"] instanceof String) {
             note(dc, cx, h * 0.70, face["note"]);
-        } else if (!today) {
-            txt(dc, cx, h * 0.70, Graphics.FONT_XTINY, "Conecta el movil");
+        }
+        if (!status.equals("")) {
+            txt(dc, cx, h * 0.88, Graphics.FONT_XTINY, status);
         }
     }
 
