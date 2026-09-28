@@ -15,11 +15,7 @@ class CoachApp extends Application.AppBase {
     }
 
     function getInitialView() {
-        try {
-            Background.registerForTemporalEvent(new Time.Duration(30 * 60));
-        } catch (e) {
-            // Background refresh is a nice-to-have; the widget also fetches on open.
-        }
+        scheduleRefresh();
         return [new CoachView()];
     }
 
@@ -29,7 +25,20 @@ class CoachApp extends Application.AppBase {
 
     function onBackgroundData(data) {
         storeFace(data);
+        scheduleRefresh();
         WatchUi.requestUpdate();
+    }
+}
+
+// Every 5 minutes (Garmin's minimum) until today's data is on the watch, so it
+// arrives a few minutes after the phone connects; then every 30 minutes.
+function scheduleRefresh() {
+    var face = Application.Storage.getValue("face");
+    var haveToday = (face instanceof Dictionary) && faceDate().equals(face["date"]);
+    try {
+        Background.registerForTemporalEvent(new Time.Duration((haveToday ? 30 : 5) * 60));
+    } catch (e) {
+        // Background refresh is a nice-to-have; the widget also fetches on open.
     }
 }
 

@@ -19,8 +19,7 @@ class PesasApp extends Application.AppBase {
 
     function getInitialView() {
         model = new PesasModel();
-        // Refresh today's plan every hour in the background while connected.
-        Background.registerForTemporalEvent(new Time.Duration(60 * 60));
+        schedulePlanRefresh();
         model.resendPending();
         model.fetchPlan();
         return [new MainView(), new MainDelegate()];
@@ -35,12 +34,23 @@ class PesasApp extends Application.AppBase {
         if (data instanceof Dictionary && data["ok"] == true && data.hasKey("date")) {
             Application.Storage.setValue("plan", data);
         }
+        schedulePlanRefresh();
     }
 
     function onStop(state) {
         if (model != null) {
             model.onAppStop();
         }
+    }
+}
+
+// Every 5 minutes until today's plan is on the watch, then every hour.
+function schedulePlanRefresh() {
+    var plan = Application.Storage.getValue("plan");
+    var haveToday = (plan instanceof Dictionary) && localDate().equals(plan["date"]);
+    try {
+        Background.registerForTemporalEvent(new Time.Duration((haveToday ? 60 : 5) * 60));
+    } catch (e) {
     }
 }
 

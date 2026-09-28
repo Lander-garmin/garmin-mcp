@@ -33,6 +33,7 @@ class CoachView extends WatchUi.View {
     function onFace(code, data) {
         if (code == 200) {
             storeFace(data);
+            scheduleRefresh();
             status = "";
         } else {
             // -104: no phone link, -300: timeout, 401/404/5xx: server side.

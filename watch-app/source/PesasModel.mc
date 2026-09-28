@@ -72,6 +72,7 @@ class PesasModel {
     function onPlan(code, data) {
         if (code == 200 && data instanceof Dictionary && data["ok"] == true) {
             Application.Storage.setValue("plan", data);
+            schedulePlanRefresh();
             usePlan(data);
         } else {
             // No phone: use the plan the background service saved earlier today.
