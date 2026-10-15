@@ -26,6 +26,7 @@ import hmac
 import json
 import secrets
 import time
+import unicodedata
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
@@ -91,6 +92,68 @@ def _pretty(enum_name: str | None) -> str:
     return enum_name.replace("_", " ").title()
 
 
+# Spanish names for the watch when the plan note does not carry one. Keyed by
+# exerciseName, or by category for Garmin's generic (category-only) exercises.
+_ES_NAMES: dict[str, str] = {
+    "BARBELL_BENCH_PRESS": "Press banca",
+    "SEATED_DUMBBELL_SHOULDER_PRESS": "Press hombro manc.",
+    "WEIGHT_PLATE_FRONT_RAISE": "Elev. frontal disco",
+    "CABLE_CROSSOVER": "Cruce de poleas",
+    "TRICEPS_PRESSDOWN": "Triceps polea",
+    "DUMBBELL_LATERAL_RAISE": "Elev. laterales",
+    "FACE_PULL": "Face pull",
+    "CHIN_UP": "Dominada",
+    "BENT_OVER_ROW_WITH_BARBELL": "Remo con barra",
+    "BARBELL_ROW": "Remo con barra",
+    "STRAIGHT_ARM_PULLDOWN": "Jalon brazos rectos",
+    "HYPEREXTENSION": "Hiperextension",
+    "DUMBBELL_HAMMER_CURL": "Curl martillo",
+    "TOES_TO_BAR": "Pies a barra",
+    "CRUNCH": "Abdominal corto",
+    "BARBELL_BACK_SQUAT": "Sentadilla",
+    "WALKING_DUMBBELL_LUNGE": "Zancadas manc.",
+    "SEATED_CALF_RAISE": "Gemelo sentado",
+    "WEIGHTED_SEATED_CALF_RAISE": "Gemelo sentado",
+    "STANDING_HIP_ABDUCTION": "Abduccion cadera",
+    "PUSH": "Empuje trineo",
+    "TREADMILL": "Cinta",
+    "INDOOR_ROW": "Remo ergometro",
+    "CHOP": "SkiErg",
+    "WALL_BALL": "Wall balls",
+}
+NAME_MAX = 22
+_NOTE_SEPARATORS = (
+    " - ",
+    " " + chr(0x2014) + " ",
+    " " + chr(0x2013) + " ",
+)  # hyphen, em dash, en dash
+
+
+def _ascii(text: str) -> str:
+    """Watch fonts draw ASCII only: fold accents, drop the rest."""
+    flat = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode("ascii")
+    return " ".join(flat.split())
+
+
+def display_name(step: dict[str, Any]) -> str:
+    """Name for the watch: the note's lead ('Hiperextension - 3x20'), else Spanish, else enum."""
+    note = str(step.get("description") or "").strip()
+    head = note
+    for sep in _NOTE_SEPARATORS:
+        head = head.split(sep, 1)[0]
+    head = _ascii(head)
+    # A lead before ' - ' is the name ('Hiperextension - 3x20'). A note with no
+    # separator only counts if it reads like a name (no numbers, e.g. not
+    # 'Objetivo: 82,5 kg').
+    named = head != _ascii(note) or not any(ch.isdigit() for ch in head)
+    if named and head and len(head) <= NAME_MAX and head.lower() != "calentamiento":
+        return head
+    key = step.get("exerciseName") or step.get("category") or ""
+    return _ascii(
+        _ES_NAMES.get(str(key)) or _pretty(step.get("exerciseName") or step.get("category"))
+    )[:NAME_MAX]
+
+
 def _kg(step: dict[str, Any]) -> float | None:
     value = step.get("weightValue")
     if value is None:
@@ -100,26 +163,50 @@ def _kg(step: dict[str, Any]) -> float | None:
     return round(kg * 2) / 2  # nearest 0.5 kg
 
 
-def _exercise(step: dict[str, Any], sets: int, rest: int) -> dict[str, Any]:
+def _target(step: dict[str, Any], entry: dict[str, Any]) -> None:
     cond = (step.get("endCondition") or {}).get("conditionTypeKey")
     value = step.get("endConditionValue")
-    entry: dict[str, Any] = {
-        "n": _pretty(step.get("exerciseName"))[:22],
-        "c": step.get("category") or "UNKNOWN",
-        "e": step.get("exerciseName") or "UNKNOWN",
-        "s": max(1, int(sets)),
-        "rest": int(rest),
-    }
     if cond == "reps" and value:
         entry["r"] = int(value)
     elif cond == "time" and value:
         entry["sec"] = int(value)
+    elif cond == "distance" and value:
+        entry["m"] = round(float(value))
+
+
+def _exercise(step: dict[str, Any], sets: int, rest: int) -> dict[str, Any]:
+    """v1 entry (one per exercise), kept for app builds older than the block format."""
+    category = step.get("category") or "UNKNOWN"
+    entry: dict[str, Any] = {
+        "n": display_name(step),
+        "c": category,
+        # Garmin's generic exercises have no exerciseName; send the category so
+        # the app always has a non-empty id to log against.
+        "e": step.get("exerciseName") or category,
+        "s": max(1, int(sets)),
+        "rest": int(rest),
+    }
+    _target(step, entry)
     kg = _kg(step)
     if kg is not None:
         entry["w"] = kg
     note = step.get("description")
     if note:
         entry["note"] = str(note)[:48]
+    return entry
+
+
+def _block_exercise(step: dict[str, Any]) -> dict[str, Any]:
+    category = step.get("category") or "UNKNOWN"
+    entry: dict[str, Any] = {
+        "n": display_name(step),
+        "c": category,
+        "e": step.get("exerciseName") or category,
+    }
+    _target(step, entry)
+    kg = _kg(step)
+    if kg is not None:
+        entry["w"] = kg
     return entry
 
 
@@ -130,24 +217,55 @@ def _rest_seconds(step: dict[str, Any]) -> int:
     return 0
 
 
-def flatten_strength_workout(workout: dict[str, Any]) -> list[dict[str, Any]]:
-    """Turn a Garmin strength workout JSON into an ordered exercise list."""
-    out: list[dict[str, Any]] = []
+def _kind(step: dict[str, Any]) -> str:
+    if step.get("type") == "RepeatGroupDTO":
+        return "repeat"
+    return str((step.get("stepType") or {}).get("stepTypeKey") or "")
+
+
+def strength_blocks(workout: dict[str, Any]) -> list[dict[str, Any]]:
+    """Garmin strength workout -> blocks the watch walks round by round.
+
+    A block is ``{"s": sets, "rest": seconds, "x": [exercises]}``; with more
+    than one exercise it is a superset: the app does x[0], x[1], ... then rests,
+    ``s`` times. A warm-up set comes as its own one-set block with ``"wu": 1``.
+    A top-level timed rest after a single step belongs to that step's block.
+    """
+    blocks: list[dict[str, Any]] = []
     for segment in workout.get("workoutSegments") or []:
         for step in segment.get("workoutSteps") or []:
-            kind = (step.get("stepType") or {}).get("stepTypeKey")
-            if step.get("type") == "RepeatGroupDTO" or kind == "repeat":
+            kind = _kind(step)
+            if kind in ("repeat",):
                 children = step.get("workoutSteps") or []
                 rest = 0
+                exercises = []
                 for child in children:
-                    if (child.get("stepType") or {}).get("stepTypeKey") == "rest":
+                    ck = _kind(child)
+                    if ck == "rest":
                         rest = _rest_seconds(child)
-                sets = int(step.get("numberOfIterations") or step.get("endConditionValue") or 1)
-                for child in children:
-                    if (child.get("stepType") or {}).get("stepTypeKey") in ("interval", "active"):
-                        out.append(_exercise(child, sets, rest))
-            elif kind in ("interval", "active") and step.get("exerciseName"):
-                out.append(_exercise(step, 1, 0))
+                    elif ck in ("interval", "active", "warmup") and child.get("category"):
+                        exercises.append(_block_exercise(child))
+                if exercises:
+                    sets = int(step.get("numberOfIterations") or step.get("endConditionValue") or 1)
+                    blocks.append({"s": max(1, sets), "rest": rest, "x": exercises})
+            elif kind in ("interval", "active", "warmup") and step.get("category"):
+                block: dict[str, Any] = {"s": 1, "rest": 0, "x": [_block_exercise(step)]}
+                if kind == "warmup":
+                    block["wu"] = 1
+                blocks.append(block)
+            elif kind == "rest" and blocks and not blocks[-1]["rest"]:
+                blocks[-1]["rest"] = _rest_seconds(step)
+    return blocks
+
+
+def flatten_strength_workout(workout: dict[str, Any]) -> list[dict[str, Any]]:
+    """v1 format: one entry per exercise (supersets are walked one exercise at a time)."""
+    out: list[dict[str, Any]] = []
+    for block in strength_blocks(workout):
+        for ex in block["x"]:
+            entry = {k: v for k, v in ex.items()}
+            entry["s"], entry["rest"] = block["s"], block["rest"]
+            out.append(entry)
     return out
 
 
@@ -155,7 +273,7 @@ def _is_strength(workout: dict[str, Any]) -> bool:
     return (workout.get("sportType") or {}).get("sportTypeKey") == "strength_training"
 
 
-async def todays_strength_workout(date: str) -> dict[str, Any]:
+async def todays_strength_workout(date: str, version: int = 1) -> dict[str, Any]:
     client = _s._get_garmin()
     day = dt.date.fromisoformat(date)
     calendar = await client.call("get_scheduled_workouts", day.year, day.month)
@@ -169,13 +287,17 @@ async def todays_strength_workout(date: str) -> dict[str, Any]:
         workout = await client.call("get_workout_by_id", item["workoutId"])
         if isinstance(workout, dict) and _is_strength(workout):
             name = str(workout.get("workoutName") or item.get("title") or "Pesas")
-            return {
+            body: dict[str, Any] = {
                 "ok": True,
                 "date": date,
                 "id": str(item["workoutId"]),
                 "name": name[:40],
-                "ex": flatten_strength_workout(workout),
             }
+            if version >= 2:
+                body["b"] = strength_blocks(workout)
+            else:
+                body["ex"] = flatten_strength_workout(workout)
+            return body
     return {"ok": True, "date": date, "none": True}
 
 
@@ -189,13 +311,19 @@ def _gmt(epoch: int) -> str:
 
 
 def build_exercise_sets(sets: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Garmin Connect exerciseSets payload (weights in grams, times in GMT)."""
+    """Garmin Connect exerciseSets payload (weights in grams, times in GMT).
+
+    A timed or distance set (sled push 60 s, 500 m row) has no reps: it is
+    written with repetitionCount None and its real duration, plus its weight.
+    """
     out: list[dict[str, Any]] = []
     for s in sets:
+        name = None if s["e"] == s["c"] else s["e"]  # generic exercise: no name
+        timed = "sec" in s or "m" in s
         entry: dict[str, Any] = {
-            "exercises": [{"category": s["c"], "name": s["e"], "probability": 100.0}],
+            "exercises": [{"category": s["c"], "name": name, "probability": 100.0}],
             "setType": "ACTIVE",
-            "repetitionCount": int(s.get("r") or 0),
+            "repetitionCount": None if timed else int(s.get("r") or 0),
             "duration": float(s.get("d") or 0),
         }
         if s.get("w") is not None:
@@ -206,20 +334,41 @@ def build_exercise_sets(sets: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return out
 
 
-def build_description(sets: list[dict[str, Any]]) -> str:
-    """One line per exercise: 'Barbell Bench Press: 80x8, 80x8, 82.5x7'."""
+def _mmss(seconds: int) -> str:
+    return f"{seconds // 60}:{seconds % 60:02d}"
+
+
+def _set_text(s: dict[str, Any]) -> str:
+    kg = float(s.get("w") or 0)
+    weight = f"{kg:g}x" if kg > 0 else ""
+    if "m" in s:
+        return f"{int(s['m'])}m {_mmss(int(s.get('d') or 0))}" + (f" {kg:g}kg" if kg > 0 else "")
+    if "sec" in s:
+        return f"{weight}{int(s.get('d') or s['sec'])}s"
+    return f"{weight}{int(s.get('r') or 0)}"
+
+
+def build_description(sets: list[dict[str, Any]], names: dict[str, str] | None = None) -> str:
+    """One line per exercise: 'Press banca: 80x8, 80x8, 82.5x7'; 'Empuje trineo: 110x60s'."""
     order: list[str] = []
     per: dict[str, list[str]] = {}
     for s in sets:
-        key = _pretty(s.get("e"))
+        key = (
+            (names or {}).get(str(s.get("e")))
+            or s.get("n")
+            or _ES_NAMES.get(str(s.get("e")))
+            or _pretty(s.get("e"))
+        )
         if key not in per:
             order.append(key)
             per[key] = []
-        reps = int(s.get("r") or 0)
-        w = s.get("w")
-        per[key].append(f"{float(w):g}x{reps}" if w is not None else f"{reps}")
+        per[key].append(_set_text(s))
     lines = [f"{k}: {', '.join(per[k])}" for k in order]
-    total = sum(float(s.get("w") or 0) * int(s.get("r") or 0) for s in sets)
+    total = sum(
+        float(s.get("w") or 0) * int(s.get("r") or 0)
+        for s in sets
+        if "sec" not in s and "m" not in s
+    )
     lines.append(
         f"Volumen total: {total:,.0f} kg · {len(sets)} series · app Pesas".replace(",", ".")
     )
@@ -272,6 +421,7 @@ async def apply_log(log_id: str, retry_seconds: float | None = None) -> None:
                 aid = activity["activityId"]
                 title = record.get("name") or "Pesas"
                 desc = build_description(record["sets"])
+                feel, rpe = record.get("feel"), record.get("rpe")
                 try:
                     await client.call(
                         "update_strength_activity",
@@ -279,12 +429,14 @@ async def apply_log(log_id: str, retry_seconds: float | None = None) -> None:
                         build_exercise_sets(record["sets"]),
                         title,
                         desc,
+                        feel,
+                        rpe,
                     )
                     record.update(status="applied", activity_id=str(aid))
                 except GarminClientError as exc:
-                    # Keep at least the title and the readable summary.
+                    # Keep at least the title, the readable summary and the rating.
                     record["sets_error"] = str(exc)[:300]
-                    await client.call("update_strength_activity", aid, [], title, desc)
+                    await client.call("update_strength_activity", aid, [], title, desc, feel, rpe)
                     record.update(status="partial", activity_id=str(aid))
                 log.info("watch.log.applied", log_id=log_id, status=record["status"])
                 return
@@ -308,15 +460,34 @@ def _validate_sets(raw: Any) -> list[dict[str, Any]]:
         item: dict[str, Any] = {
             "c": str(s["c"])[:60],
             "e": str(s["e"])[:80],
-            "r": max(0, min(int(s.get("r") or 0), 1000)),
             "d": max(0, min(int(s.get("d") or 0), 3600)),
         }
+        if s.get("sec") is not None:
+            item["sec"] = max(0, min(int(s["sec"]), 3600))
+        elif s.get("m") is not None:
+            item["m"] = max(0, min(int(s["m"]), 10000))
+        else:
+            item["r"] = max(0, min(int(s.get("r") or 0), 1000))
         if s.get("w") is not None:
             item["w"] = max(0.0, min(float(s["w"]), 1000.0))
         if s.get("t"):
             item["t"] = int(s["t"])
+        if s.get("n"):
+            item["n"] = _ascii(str(s["n"]))[:NAME_MAX]
         out.append(item)
     return out
+
+
+FEEL_VALUES = (0, 25, 50, 75, 100)
+
+
+def _validate_rating(data: dict[str, Any]) -> tuple[int | None, int | None]:
+    """Post-session rating from the app: feel 0/25/50/75/100, RPE 1-10 (Garmin stores x10)."""
+    feel = data.get("feel")
+    rpe = data.get("rpe")
+    feel_v = int(feel) if feel is not None and int(feel) in FEEL_VALUES else None
+    rpe_v = int(rpe) * 10 if rpe is not None and 1 <= int(rpe) <= 10 else None
+    return feel_v, rpe_v
 
 
 # ---------------------------------------------------------------------------
@@ -396,7 +567,8 @@ async def watch_today(request: Request) -> Response:
     date = request.query_params.get("date") or _s._today_iso()
     try:
         dt.date.fromisoformat(date)
-        body = await todays_strength_workout(date)
+        version = int(request.query_params.get("v") or 1)
+        body = await todays_strength_workout(date, version)
     except ValueError:
         return JSONResponse({"ok": False, "error": "bad date"}, status_code=400)
     except GarminClientError as exc:
@@ -412,6 +584,7 @@ async def watch_log(request: Request) -> Response:
         data = json.loads(await request.body())
         sets = _validate_sets(data.get("sets"))
         start = int(data["start"])
+        feel, rpe = _validate_rating(data)
     except (ValueError, KeyError, TypeError) as exc:
         return JSONResponse({"ok": False, "error": str(exc)[:120]}, status_code=400)
     # The app re-sends a session it could not confirm (e.g. it was closed while
@@ -427,6 +600,8 @@ async def watch_log(request: Request) -> Response:
         "dur": int(data.get("dur") or 0),
         "name": str(data.get("name") or "Pesas")[:60],
         "sets": sets,
+        "feel": feel,
+        "rpe": rpe,
         "status": "queued",
     }
     for old in sorted(_logs, key=lambda k: _logs[k]["received"])[:-MAX_LOGS]:

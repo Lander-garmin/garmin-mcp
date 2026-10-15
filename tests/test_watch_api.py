@@ -61,17 +61,18 @@ def test_flatten_strength_workout() -> None:
     assert [e["e"] for e in ex] == ["BARBELL_BENCH_PRESS", "DUMBBELL_LATERAL_RAISE", "PLANK"]
     bench, lateral, plank = ex
     assert bench == {
-        "n": "Barbell Bench Press",
+        "n": "Press banca",  # 'Objetivo: 82,5 kg' is a target, not a name
         "c": "BENCH_PRESS",
         "e": "BARBELL_BENCH_PRESS",
         "s": 4,
         "rest": 120,
         "r": 8,
         "w": 80.0,
-        "note": "Objetivo: 82,5 kg",
     }
     assert lateral["s"] == 3 and lateral["rest"] == 0 and lateral["w"] == 13.5  # 30 lb
+    # PLANK is Garmin's generic exercise: no exerciseName, the category stands in.
     assert plank["s"] == 1 and plank["sec"] == 45 and "r" not in plank
+    assert plank["c"] == "PLANK" and plank["n"] == "Plank"
 
 
 def test_watch_key_is_derived_and_stable() -> None:
@@ -99,11 +100,11 @@ def test_description_and_sets_payload() -> None:
             "t": 1759240200,
             "d": 42,
         },
-        {"c": "PLANK", "e": "PLANK", "r": 0, "d": 45},
+        {"c": "PLANK", "e": "PLANK", "sec": 45, "d": 45},
     ]
     desc = watch_api.build_description(sets)
-    assert desc.splitlines()[0] == "Barbell Bench Press: 80x8, 82.5x7"
-    assert desc.splitlines()[1] == "Plank: 0"
+    assert desc.splitlines()[0] == "Press banca: 80x8, 82.5x7"
+    assert desc.splitlines()[1] == "Plank: 45s"
     assert "Volumen total: 1.218 kg" in desc
     payload = watch_api.build_exercise_sets(sets)
     assert payload[0]["exercises"][0] == {
@@ -204,6 +205,8 @@ async def test_log_is_applied_to_matching_activity(
         "start": start,
         "dur": 3600,
         "name": "Pesas Push",
+        "feel": 75,
+        "rpe": 7,
         "sets": [
             {
                 "c": "BENCH_PRESS",
@@ -230,9 +233,10 @@ async def test_log_is_applied_to_matching_activity(
             break
     record = watch_api._logs[r.json()["id"]]
     assert record["status"] == "applied" and record["activity_id"] == "22"
-    aid, sets, title, desc = calls[0]
+    aid, sets, title, desc, feel, rpe = calls[0]
     assert aid == 22 and title == "Pesas Push" and sets[0]["weight"] == 80000.0
-    assert desc.startswith("Barbell Bench Press: 80x8")
+    assert desc.startswith("Press banca: 80x8")
+    assert feel == 75 and rpe == 70  # RPE 7 is stored x10
     logs = await watch_api.get_watch_strength_logs()
     assert logs["logs"][0]["id"] == r.json()["id"]
 
@@ -242,7 +246,9 @@ async def test_apply_falls_back_to_description_when_sets_rejected(keyed: str) ->
     start = int(dt.datetime(2026, 9, 30, 15, 30, tzinfo=dt.UTC).timestamp())
     calls: list[tuple[Any, ...]] = []
 
-    def update(aid: Any, sets: Any, title: Any, desc: Any) -> Any:
+    def update(
+        aid: Any, sets: Any, title: Any, desc: Any, feel: Any = None, rpe: Any = None
+    ) -> Any:
         calls.append((aid, sets, title, desc))
         if sets:
             raise GarminClientError("400 bad exerciseSets")
@@ -272,7 +278,7 @@ async def test_apply_falls_back_to_description_when_sets_rejected(keyed: str) ->
     await watch_api.apply_log("abc", retry_seconds=0)
     rec = watch_api._logs["abc"]
     assert rec["status"] == "partial" and "400" in rec["sets_error"]
-    assert calls[-1][1] == [] and calls[-1][3].startswith("Barbell Bench Press")
+    assert calls[-1][1] == [] and calls[-1][3].startswith("Press banca")
 
 
 def test_watch_routes_registered() -> None:

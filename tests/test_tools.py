@@ -112,7 +112,7 @@ async def test_get_sleep_uses_cache() -> None:
 
 @pytest.mark.asyncio
 async def test_get_recent_activities_caps_limit() -> None:
-    fake = FakeGarminClient({"get_activities": ACTIVITIES_PAYLOAD})
+    fake = FakeGarminClient({"get_activities": ACTIVITIES_PAYLOAD, "get_activity": {}})
     server_module.set_garmin_client_for_testing(fake)
 
     await server_module.get_recent_activities(limit=500)
@@ -123,7 +123,12 @@ async def test_get_recent_activities_caps_limit() -> None:
 
 @pytest.mark.asyncio
 async def test_get_recent_activities_parses_payload() -> None:
-    fake = FakeGarminClient({"get_activities": ACTIVITIES_PAYLOAD})
+    fake = FakeGarminClient(
+        {
+            "get_activities": ACTIVITIES_PAYLOAD,
+            "get_activity": {"summaryDTO": {"directWorkoutFeel": 75, "directWorkoutRpe": 60}},
+        }
+    )
     server_module.set_garmin_client_for_testing(fake)
 
     result = await server_module.get_recent_activities(limit=5)
@@ -134,6 +139,7 @@ async def test_get_recent_activities_parses_payload() -> None:
     assert activity.activity_type == "running"
     assert activity.distance_meters == 6500.0
     assert activity.avg_heart_rate == 152.0
+    assert activity.feel == "Bien" and activity.feel_raw == 75 and activity.rpe == 6
 
 
 @pytest.mark.asyncio

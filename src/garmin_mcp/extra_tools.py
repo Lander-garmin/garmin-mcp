@@ -539,33 +539,69 @@ async def get_running_tolerance(
 # ---------------------------------------------------------------------------
 
 
+# Per-activity keys that only cost tokens (account roles, avatar URLs, dive info).
+_ACTIVITY_NOISE = (
+    "userRoles",
+    "ownerProfileImageUrlSmall",
+    "ownerProfileImageUrlMedium",
+    "ownerProfileImageUrlLarge",
+    "ownerDisplayName",
+    "summarizedDiveInfo",
+    "privacy",
+)
+
+
+def _slim_activities(raw: Any) -> Any:
+    if not isinstance(raw, list):
+        return raw
+    return [
+        {k: v for k, v in a.items() if k not in _ACTIVITY_NOISE} if isinstance(a, dict) else a
+        for a in raw
+    ]
+
+
 @mcp.tool()
 async def get_activities_by_date(
     start_date: str | None = None,
     end_date: str | None = None,
     activity_type: str | None = None,
+    include_feedback: bool = True,
 ) -> GarminData:
     """Activities between two dates, optionally filtered by type (running, cycling, swimming, ...).
+
+    With ``include_feedback`` the first 14 activities also carry the rating
+    entered on the watch: ``feel`` (Muy mal ... Muy bien) and ``rpe`` (1-10).
 
     Args:
         start_date: YYYY-MM-DD. Defaults to 30 days ago.
         end_date: YYYY-MM-DD. Defaults to today.
         activity_type: Garmin type key such as running, cycling, walking, strength_training.
+        include_feedback: Add feel / RPE per activity (one extra Garmin call each).
     """
     start = _s._normalise_date(start_date, _days_ago_iso(30))
     end = _s._normalise_date(end_date, _s._today_iso())
     params: dict[str, Any] = {"start": start, "end": end}
     if activity_type:
         params["type"] = activity_type
-    return await _fetch(
+    result = await _fetch(
         "get_activities_by_date",
         "get_activities_by_date",
         start,
         end,
         activity_type,
         params=params,
+        transform=_slim_activities,
         max_items=60,
     )
+    if not include_feedback or not isinstance(result.data, list):
+        return result
+    enriched: list[Any] = []
+    for i, act in enumerate(result.data):
+        if i < _s.FEEDBACK_MAX and isinstance(act, dict) and act.get("activityId"):
+            rating = await _s._activity_rating(str(act["activityId"]))
+            act = {**act, **rating}
+        enriched.append(act)
+    return result.model_copy(update={"data": enriched})
 
 
 @mcp.tool()

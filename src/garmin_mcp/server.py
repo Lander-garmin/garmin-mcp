@@ -47,6 +47,7 @@ from garmin_mcp.auth import InvalidLoginError, SimpleOAuthProvider
 from garmin_mcp.cache import TTLCache
 from garmin_mcp.exercise_resolver import (
     category_for_exercise,
+    is_generic_category,
     resolve_exercise,
     valid_exercise_names,
 )
@@ -61,6 +62,7 @@ from garmin_mcp.models import (
     BodyBatterySummary,
     BodyCompositionDay,
     BodyCompositionTrend,
+    CyclingWorkoutInput,
     DailyBriefing,
     EnduranceContributor,
     EnduranceScore,
@@ -106,6 +108,7 @@ from garmin_mcp.models import (
 )
 from garmin_mcp.paths import default_token_dir
 from garmin_mcp.running_builder import (
+    build_cycling_workout,
     build_running_workout,
     estimate_duration_seconds,
     pace_warnings,
@@ -120,6 +123,7 @@ from garmin_mcp.strength_builder import (
     build_strength_workout,
     summarize,
 )
+from garmin_mcp.strength_builder import lint as lint_strength
 
 load_dotenv()
 
@@ -314,12 +318,56 @@ async def get_sleep(date: str | None = None) -> SleepSummary:
     return result
 
 
+# Garmin's post-activity rating ("How did you feel?" + perceived effort).
+FEEL_LABELS = {0: "Muy mal", 25: "Mal", 50: "Normal", 75: "Bien", 100: "Muy bien"}
+FEEDBACK_MAX = 14  # activities enriched per list call (one Garmin call each)
+
+
+def _rating_from_summary(summary: Any) -> dict[str, Any]:
+    """feel / feel_raw / rpe from an activity's summaryDTO (empty when not rated)."""
+    if not isinstance(summary, dict):
+        return {}
+    dto = summary.get("summaryDTO") or summary
+    if not isinstance(dto, dict):
+        return {}
+    out: dict[str, Any] = {}
+    feel = _opt_int(dto.get("directWorkoutFeel"))
+    if feel is not None:
+        nearest = min(FEEL_LABELS, key=lambda k: abs(k - feel))
+        out.update(feel=FEEL_LABELS[nearest], feel_raw=feel)
+    rpe = _opt_int(dto.get("directWorkoutRpe"))
+    if rpe is not None and rpe > 0:
+        out["rpe"] = max(1, min(10, round(rpe / 10)))
+    return out
+
+
+async def _activity_rating(activity_id: str) -> dict[str, Any]:
+    """The rating of one activity (cached 30 min; {} on error or when not rated)."""
+    cache_key = TTLCache.make_key("activity_rating", {"id": activity_id})
+
+    async def fetch() -> dict[str, Any]:
+        client = _get_garmin()
+        return _rating_from_summary(await client.call("get_activity", activity_id))
+
+    try:
+        result: dict[str, Any] = await _cache.get_or_compute(cache_key, 1800, fetch)
+    except GarminClientError as exc:
+        log.warning("activity.rating.failed", activity_id=activity_id, error=str(exc)[:200])
+        return {}
+    return result
+
+
 @mcp.tool()
-async def get_recent_activities(limit: int = 10) -> ActivityList:
+async def get_recent_activities(limit: int = 10, include_feedback: bool = True) -> ActivityList:
     """List recent activities with type, duration, distance, and average heart rate.
+
+    With ``include_feedback`` each activity (up to 14) also carries the rating
+    entered on the watch after it: ``feel`` (Muy mal ... Muy bien) and ``rpe``
+    (perceived effort 1-10). None means it was not rated.
 
     Args:
         limit: How many of the most recent activities to return. Capped at 50.
+        include_feedback: Add feel / RPE (one extra Garmin call per activity).
     """
     limit = max(1, min(50, limit))
     cache_key = TTLCache.make_key("get_recent_activities", {"limit": limit})
@@ -330,12 +378,22 @@ async def get_recent_activities(limit: int = 10) -> ActivityList:
         return _parse_activity_list(raw)
 
     result: ActivityList = await _cache.get_or_compute(cache_key, 300, fetch)
-    return result
+    if not include_feedback:
+        return result
+    enriched: list[Activity] = []
+    for i, act in enumerate(result.activities):
+        if i < FEEDBACK_MAX and act.activity_id and act.activity_id != "None":
+            act = act.model_copy(update=await _activity_rating(act.activity_id))
+        enriched.append(act)
+    return ActivityList(activities=enriched, count=len(enriched))
 
 
 @mcp.tool()
 async def get_activity_details(activity_id: str) -> ActivityDetail:
     """Detailed metrics for one activity, including splits and HR zones.
+
+    Also returns the post-activity rating entered on the watch: ``feel``
+    (Muy mal / Mal / Normal / Bien / Muy bien) and ``rpe`` (perceived effort 1-10).
 
     Args:
         activity_id: The activity's numeric Garmin ID, as returned by
@@ -359,7 +417,8 @@ async def get_activity_details(activity_id: str) -> ActivityDetail:
             zones = None
         return _parse_activity_detail(activity_id, summary, splits, zones)
 
-    result: ActivityDetail = await _cache.get_or_compute(cache_key, 86400, fetch)
+    # Short TTL: the rating can be entered or edited after the activity syncs.
+    result: ActivityDetail = await _cache.get_or_compute(cache_key, 1800, fetch)
     return result
 
 
@@ -922,14 +981,34 @@ def _spec_from_input(
                     exercise_name=name,
                     reps=ex.reps,
                     seconds=ex.seconds,
+                    meters=ex.meters,
                     weight=ex.weight,
                     weight_unit=ex.weight_unit,
                     label=ex.name,
                     note=ex.note,
+                    display_name=ex.display_name,
                 )
             )
+        warmup = None
+        if block.warmup is not None:
+            first = set_specs[0]
+            warmup = SetSpec(
+                category=first.category,
+                exercise_name=first.exercise_name,
+                reps=block.warmup.reps,
+                weight=block.warmup.weight,
+                weight_unit=first.weight_unit,
+                label=first.label,
+                note="Calentamiento",
+                display_name=first.display_name,
+            )
         blocks.append(
-            BlockSpec(sets=block.sets, exercises=set_specs, rest_seconds=block.rest_seconds)
+            BlockSpec(
+                sets=block.sets,
+                exercises=set_specs,
+                rest_seconds=block.rest_seconds,
+                warmup=warmup,
+            )
         )
     spec = StrengthWorkoutSpec(
         name=workout.name, blocks=blocks, include_warmup=workout.include_warmup
@@ -949,8 +1028,11 @@ def _blank_interval_steps(wj: dict[str, Any]) -> list[int]:
         for s in steps:
             if s.get("type") == "RepeatGroupDTO":
                 walk(s.get("workoutSteps", []))
-            elif (s.get("stepType") or {}).get("stepTypeKey") == "interval" and not s.get(
-                "exerciseName"
+            elif (
+                (s.get("stepType") or {}).get("stepTypeKey") in ("interval", "warmup")
+                and s.get("category")
+                and not s.get("exerciseName")
+                and not is_generic_category(str(s.get("category")))
             ):
                 # Defensive: stepOrder may be absent, null, or non-numeric in
                 # Garmin's re-fetched JSON; int(None) would crash the verify walk.
@@ -976,6 +1058,7 @@ async def preview_strength_workout(workout: StrengthWorkoutInput) -> StrengthWor
     """
     spec, infos, warnings = _spec_from_input(workout)
     payload = build_strength_workout(spec)
+    warnings = warnings + lint_strength(spec)
     return StrengthWorkoutPreview(
         name=workout.name,
         summary=summarize(spec),
@@ -1293,6 +1376,87 @@ async def create_running_workout(
     return RunningWorkoutCreated(workout_id=workout_id, name=workout.name, status=status)
 
 
+def _cycling_token(payload: dict[str, Any]) -> str:
+    """Content-bound confirmation token; same scheme as ``_strength_token``."""
+    if not JWT_SECRET:
+        return ""
+    canonical = "cycling-workout-v1:" + json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hmac.new(JWT_SECRET.encode(), canonical.encode(), hashlib.sha256).hexdigest()[:16]
+
+
+@mcp.tool()
+async def preview_cycling_workout(workout: CyclingWorkoutInput) -> RunningWorkoutPreview:
+    """Assemble a cycling workout and show what WOULD be created — no network call.
+
+    Steps end on time or distance and can carry a heart-rate range
+    (hr_min_bpm/hr_max_bpm): the watch alerts when you leave it. Returns a
+    summary and a ``confirmation_token`` for ``create_cycling_workout``.
+
+    Args:
+        workout: the workout definition (name, steps and/or repeat groups).
+    """
+    payload = build_cycling_workout(workout)
+    return RunningWorkoutPreview(
+        name=workout.name,
+        summary=summarize_running(workout),
+        estimated_duration_seconds=estimate_duration_seconds(workout),
+        warnings=[],
+        confirmation_token=_cycling_token(payload),
+    )
+
+
+@mcp.tool()
+async def create_cycling_workout(
+    workout: CyclingWorkoutInput,
+    confirmation_token: str = "",
+    confirm: bool = False,
+) -> RunningWorkoutCreated:
+    """Create a cycling workout in your Garmin Connect library (a WRITE).
+
+    Requires writes to be enabled and the ``confirmation_token`` from
+    ``preview_cycling_workout``. Put it on the watch with ``schedule_workout``.
+
+    Args:
+        workout: the workout definition (same shape as preview).
+        confirmation_token: token returned by ``preview_cycling_workout``.
+        confirm: dev/stdio only (no JWT secret) — set True to confirm.
+    """
+    if not WRITE_ENABLED:
+        log.warning("cycling.create.denied", name=workout.name, reason="writes_disabled")
+        raise ValueError(
+            "Writes are disabled. Set GARMIN_WRITE_ENABLED=1 to allow creating workouts."
+        )
+    payload = build_cycling_workout(workout)
+    expected = _cycling_token(payload)
+    if expected:
+        if not hmac.compare_digest(confirmation_token, expected):
+            raise ValueError(
+                "confirmation_token does not match this workout — call "
+                "preview_cycling_workout again and pass its token."
+            )
+    elif confirm and _TRANSPORT == "stdio":
+        log.info("cycling.create.dev_confirm", name=workout.name)
+    else:
+        raise ValueError(
+            "Cannot confirm this write: set JWT_SECRET and pass the token from "
+            "preview_cycling_workout. (confirm=True is honored only on local stdio.)"
+        )
+    client = _get_garmin()
+    result = await client.call("upload_workout", payload)
+    workout_id = (
+        str(result["workoutId"])
+        if isinstance(result, dict) and result.get("workoutId") is not None
+        else None
+    )
+    log.info("cycling.create.success", workout_id=workout_id, name=workout.name)
+    status = (
+        f"Created '{workout.name}'"
+        + (f" (id {workout_id})" if workout_id else "")
+        + " in your Garmin Connect library. Schedule it with schedule_workout to sync it."
+    )
+    return RunningWorkoutCreated(workout_id=workout_id, name=workout.name, status=status)
+
+
 @mcp.tool()
 async def schedule_workout(workout_id: str, date: str) -> WorkoutScheduled:
     """Put an existing library workout on a Garmin Connect calendar date (a WRITE).
@@ -1475,6 +1639,7 @@ def _parse_activity_detail(
         training_effect_anaerobic=_opt_float(
             summary_dto.get("anaerobicTrainingEffect") or summary.get("anaerobicTrainingEffect")
         ),
+        **_rating_from_summary(summary),
     )
 
     if isinstance(splits, dict):
@@ -2101,6 +2266,9 @@ def _parse_strength_sets(activity_id: str, raw: Any) -> StrengthSession:
         summary.sets += 1
         if reps is not None:
             summary.total_reps += reps
+        duration = _opt_float(entry.get("duration"))
+        if reps is None and duration:
+            summary.total_seconds = (summary.total_seconds or 0.0) + duration
         if weight_kg is not None and (
             summary.max_weight_kg is None or weight_kg > summary.max_weight_kg
         ):
@@ -2325,3 +2493,4 @@ if __name__ == "__main__":
         run_http()
     else:
         run_stdio()
+from garmin_mcp import rules as _rules  # noqa: E402,F401

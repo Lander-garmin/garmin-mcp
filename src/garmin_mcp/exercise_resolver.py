@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import re
+import unicodedata
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 from functools import lru_cache
@@ -64,6 +65,29 @@ _OVERRIDES: dict[str, tuple[str, str]] = {
     # "Seated Leg Curl" otherwise wins CRUNCH/SEATED_LEG_U (an ab move) on the
     # "seated"+"leg" token overlap — a confidently-wrong, wrong-muscle match.
     "seated leg curl": ("LEG_CURL", "WEIGHTED_LEG_CURL"),
+    # "Back Extension" otherwise matches BANDED_EXERCISES/BACK_EXTENSION (a band
+    # move). The gym bench movement is Garmin's generic HYPEREXTENSION.
+    "back extension": ("HYPEREXTENSION", "HYPEREXTENSION"),
+    "back extensions": ("HYPEREXTENSION", "HYPEREXTENSION"),
+    "hyperextension": ("HYPEREXTENSION", "HYPEREXTENSION"),
+    "hyperextensions": ("HYPEREXTENSION", "HYPEREXTENSION"),
+    "hiperextension": ("HYPEREXTENSION", "HYPEREXTENSION"),
+    "weighted hyperextension": ("HYPEREXTENSION", "HYPEREXTENSION"),
+    # The abduction machine has no own enum; standing hip abduction is the
+    # closest and keeps the volume on the right muscle. No adduction pairing.
+    "hip abduction machine": ("HIP_STABILITY", "STANDING_HIP_ABDUCTION"),
+    "hip abduction": ("HIP_STABILITY", "STANDING_HIP_ABDUCTION"),
+    "sled push": ("SLED", "PUSH"),
+    "wall ball": ("SQUAT", "WALL_BALL"),
+    "wall balls": ("SQUAT", "WALL_BALL"),
+    "treadmill": ("RUN_INDOOR", "TREADMILL"),
+    "treadmill run": ("RUN_INDOOR", "TREADMILL"),
+    "rowing machine": ("ROW", "INDOOR_ROW"),
+    "rowing": ("ROW", "INDOOR_ROW"),
+    "rower": ("ROW", "INDOOR_ROW"),
+    # Garmin has no SkiErg; CHOP (double-arm pull down) is the closest generic.
+    "skierg": ("CHOP", "CHOP"),
+    "ski erg": ("CHOP", "CHOP"),
 }
 
 # Categories that are not mainstream free-weight/machine lifting. A correct
@@ -114,6 +138,8 @@ class ResolvedExercise:
 
 
 def _normalise(text: str) -> list[str]:
+    # Fold accents first ("Hiperextensión" -> "hiperextension").
+    text = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode()
     text = text.lower()
     text = re.sub(r"[^a-z0-9 ]+", " ", text)  # drop punctuation incl. "↔", "/"
     tokens: list[str] = []
@@ -171,11 +197,23 @@ def _name_to_category() -> dict[str, str]:
     out: dict[str, str] = {}
     for category, name, _toks in _index():
         current = out.get(name)
-        if current is None or (
-            current in _JUNK_CATEGORIES and category not in _JUNK_CATEGORIES
-        ):
+        if current is None or (current in _JUNK_CATEGORIES and category not in _JUNK_CATEGORIES):
             out[name] = category
     return out
+
+
+@lru_cache(maxsize=1)
+def _generic_categories() -> frozenset[str]:
+    return frozenset(cat for cat, name, _toks in _index() if cat == name)
+
+
+def is_generic_category(category: str) -> bool:
+    """True if Garmin has a bare entry for category (e.g. HYPEREXTENSION).
+
+    Garmin stores that generic exercise with an empty exerciseName, so a blank
+    name on re-fetch is expected for it, not a failed mapping.
+    """
+    return category in _generic_categories()
 
 
 def category_for_exercise(name: str) -> str | None:
@@ -206,7 +244,7 @@ def resolve_exercise(query: str) -> ResolvedExercise:
             query=query,
             category=category,
             exercise_name=exercise_name,
-            confidence="high",
+            confidence="exact",
             score=1.0,
             matched_label=_label(exercise_name),
         )

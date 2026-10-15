@@ -38,6 +38,12 @@ _END_TIME = {
     "displayOrder": 2,
     "displayable": True,
 }
+_END_DISTANCE = {
+    "conditionTypeId": 3,
+    "conditionTypeKey": "distance",
+    "displayOrder": 3,
+    "displayable": True,
+}
 _END_ITER = {
     "conditionTypeId": 7,
     "conditionTypeKey": "iterations",
@@ -54,6 +60,10 @@ _END_REPS = {
 _TARGET_NONE = {"workoutTargetTypeId": 1, "workoutTargetTypeKey": "no.target", "displayOrder": 1}
 _UNIT_POUND = {"unitId": 9, "unitKey": "pound", "factor": 453.59237}
 _UNIT_KILOGRAM = {"unitId": 8, "unitKey": "kilogram", "factor": 1000.0}
+_UNIT_METER = {"unitId": 1, "unitKey": "meter", "factor": 100.0}
+
+# Lint threshold for previews (house rule: at most 6 blocks per session).
+MAX_BLOCKS = 6
 
 # Accepted spellings for the two units, normalised to Garmin's canonical key.
 # Without this, any value that is not exactly "kilogram" (e.g. "kg") silently
@@ -87,31 +97,52 @@ def normalize_weight_unit(unit: str) -> str:
 class SetSpec:
     """One exercise performed inside a block.
 
-    ``reps`` uses the native reps end condition. If ``seconds`` is given instead
-    (e.g. a 30s plank), a time end condition is used. ``weight``/``weight_unit``
-    are optional — omitted from the payload when ``weight`` is None.
+    Exactly one end condition: ``reps`` (native reps), ``seconds`` (a timed set,
+    e.g. a 60 s sled push; the watch counts down) or ``meters`` (a distance
+    set, e.g. 500 m on the rower). ``weight``/``weight_unit`` are optional and
+    combine with any of them; omitted from the payload when ``weight`` is None.
     """
 
     category: str
     exercise_name: str
     reps: int | None = None
     seconds: int | None = None
+    meters: float | None = None
     weight: float | None = None
-    weight_unit: str = "pound"  # "pound" | "kilogram"
+    weight_unit: str = "kilogram"  # "pound" | "kilogram"
     label: str | None = None  # human-readable, for the preview summary
-    note: str | None = None  # -> step description; carries rep range/RPE and,
-    # for imperfect matches, the original exercise name so the watch shows it.
+    note: str | None = None  # -> step description (after display_name)
+    # Name shown on the watch (e.g. Spanish "Hiperextension"); it leads the step
+    # description so the Pesas app and Garmin Connect both show it.
+    display_name: str | None = None
 
     def __post_init__(self) -> None:
         # Normalise here so both the payload (_weight_unit_obj) and the preview
         # (summarize) agree, and an unknown unit fails loud rather than silently
-        # becoming pounds — regardless of who built the SetSpec.
+        # becoming pounds, regardless of who built the SetSpec.
         self.weight_unit = normalize_weight_unit(self.weight_unit)
+        given = [x for x in (self.reps, self.seconds, self.meters) if x is not None]
+        if len(given) != 1:
+            raise ValueError(
+                f"{self.label or self.exercise_name}: give exactly one of reps, seconds or meters"
+            )
+
+    @property
+    def description(self) -> str | None:
+        if self.display_name and self.note:
+            if self.note.lower().startswith(self.display_name.lower()):
+                return self.note
+            return f"{self.display_name} - {self.note}"
+        return self.display_name or self.note
 
 
 @dataclass
 class BlockSpec:
-    """A repeat group: ``sets`` rounds of ``exercises`` (>1 = superset), then rest."""
+    """A repeat group: ``sets`` rounds of ``exercises`` (>1 = superset), then rest.
+
+    ``warmup`` is one lighter set of the block's first exercise, done before
+    the working sets and followed by the same rest.
+    """
 
     sets: int
     exercises: list[SetSpec]
@@ -119,13 +150,14 @@ class BlockSpec:
     # Rest length. None -> the rest ends on the lap button (user-controlled);
     # a number -> a timed countdown the watch vibrates at, like a gym app timer.
     rest_seconds: int | None = None
+    warmup: SetSpec | None = None
 
 
 @dataclass
 class StrengthWorkoutSpec:
     name: str
     blocks: list[BlockSpec]
-    include_warmup: bool = True
+    include_warmup: bool = False
     notes: str | None = None  # written to the workout description
 
 
@@ -142,26 +174,29 @@ def _weight_unit_obj(unit: str) -> dict[str, Any]:
     return _UNIT_KILOGRAM if unit == "kilogram" else _UNIT_POUND
 
 
-def _interval_step(s: SetSpec, order: int) -> dict[str, Any]:
-    if s.reps is not None:
-        end_cond, end_val = _END_REPS, float(s.reps)
-    elif s.seconds is not None:
-        end_cond, end_val = _END_TIME, float(s.seconds)
-    else:
-        raise ValueError(f"{s.exercise_name}: a set needs either reps or seconds")
-
+def _interval_step(
+    s: SetSpec, order: int, step_type: dict[str, Any] = _STEP_INTERVAL
+) -> dict[str, Any]:
     step: dict[str, Any] = {
         "type": "ExecutableStepDTO",
         "stepOrder": order,
-        "stepType": _STEP_INTERVAL,
-        "endCondition": end_cond,
-        "endConditionValue": end_val,
+        "stepType": step_type,
         "targetType": _TARGET_NONE,
         "category": s.category,
-        "exerciseName": s.exercise_name,
+        # A bare category (e.g. HYPEREXTENSION/HYPEREXTENSION) is Garmin's generic
+        # exercise: it is stored with no exerciseName, so don't send one.
+        "exerciseName": None if s.exercise_name == s.category else s.exercise_name,
     }
-    if s.note:
-        step["description"] = s.note
+    if s.reps is not None:
+        step["endCondition"], step["endConditionValue"] = _END_REPS, float(s.reps)
+    elif s.seconds is not None:
+        step["endCondition"], step["endConditionValue"] = _END_TIME, float(s.seconds)
+    else:
+        step["endCondition"], step["endConditionValue"] = _END_DISTANCE, float(s.meters or 0)
+        step["preferredEndConditionUnit"] = _UNIT_METER
+    description = s.description
+    if description:
+        step["description"] = description
     if s.weight is not None:
         step["weightValue"] = float(s.weight)
         step["weightUnit"] = _weight_unit_obj(s.weight_unit)
@@ -208,10 +243,18 @@ def build_strength_workout(spec: StrengthWorkoutSpec) -> dict[str, Any]:
         if not block.exercises:
             raise ValueError("a block needs at least 1 exercise")
 
+        if block.warmup is not None:
+            steps.append(_interval_step(block.warmup, counter.next(), _STEP_WARMUP))
+            if block.rest_seconds:
+                steps.append(_rest_step(counter.next(), block.rest_seconds))
+
         if block.sets == 1:
-            # Single set: emit the exercise step(s) inline, no repeat wrapper.
+            # Single set: emit the exercise step(s) inline, no repeat wrapper,
+            # then the timed rest so the countdown still runs before the next block.
             for s in block.exercises:
                 steps.append(_interval_step(s, counter.next()))
+            if block.rest_after_set and block.rest_seconds:
+                steps.append(_rest_step(counter.next(), block.rest_seconds))
             continue
 
         group_order = counter.next()
@@ -251,27 +294,52 @@ def build_strength_workout(spec: StrengthWorkoutSpec) -> dict[str, Any]:
     return payload
 
 
+def _target(s: SetSpec) -> str:
+    if s.reps is not None:
+        return f" {s.reps} reps"
+    if s.seconds is not None:
+        return f" {s.seconds}s"
+    return f" {s.meters:g}m"
+
+
+def _set_label(s: SetSpec) -> str:
+    unit = "kg" if s.weight_unit == "kilogram" else "lb"
+    weight = f" @ {s.weight:g}{unit}" if s.weight is not None else ""
+    shown = f" [{s.display_name}]" if s.display_name else ""
+    return (s.label or s.exercise_name) + shown + _target(s) + weight
+
+
 def summarize(spec: StrengthWorkoutSpec) -> str:
     """Human-readable one-block-per-line summary for previews."""
     lines = [f"# {spec.name}"]
     if spec.include_warmup:
         lines.append("  warmup (press lap to start)")
     for block in spec.blocks:
-        names = " + ".join(
-            (s.label or s.exercise_name)
-            + (f" {s.reps} reps" if s.reps is not None else f" {s.seconds}s")
-            + (
-                f" @ {s.weight:g}{'kg' if s.weight_unit == 'kilogram' else 'lb'}"
-                if s.weight is not None
-                else ""
-            )
-            for s in block.exercises
-        )
+        if block.warmup is not None:
+            lines.append(f"  1x warmup {_set_label(block.warmup)}")
+        names = " + ".join(_set_label(s) for s in block.exercises)
         tag = "superset" if len(block.exercises) > 1 else "exercise"
         rest = ""
-        if block.sets > 1 and block.rest_after_set:
+        if block.rest_after_set:
             rest = f", rest {block.rest_seconds}s" if block.rest_seconds else ", rest: lap"
         lines.append(f"  {block.sets}x {names}   ({tag}{rest})")
     if spec.notes:
         lines.append(f"  notes: {spec.notes}")
     return "\n".join(lines)
+
+
+def lint(spec: StrengthWorkoutSpec) -> list[str]:
+    """Rule checks shown as preview warnings (they do not block the create)."""
+    out: list[str] = []
+    if len(spec.blocks) > MAX_BLOCKS:
+        out.append(f"{len(spec.blocks)} blocks: the limit is {MAX_BLOCKS}")
+    if spec.include_warmup:
+        out.append("include_warmup adds a lap-button step; use a block 'warmup' set instead")
+    for i, block in enumerate(spec.blocks, 1):
+        if block.rest_after_set and not block.rest_seconds:
+            out.append(f"block {i}: no rest_seconds, rest ends on the lap button (no countdown)")
+        sets = list(block.exercises) + ([block.warmup] if block.warmup else [])
+        for st in sets:
+            if st.weight is not None and st.weight_unit != "kilogram":
+                out.append(f"block {i}: '{st.label or st.exercise_name}' weight is in pounds")
+    return out

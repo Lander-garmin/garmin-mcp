@@ -52,6 +52,20 @@ class Activity(_StrictBase):
     avg_heart_rate: float | None = None
     max_heart_rate: float | None = None
     calories: float | None = None
+    feel: str | None = Field(
+        default=None,
+        description=(
+            "How the athlete felt, rated on the watch after the activity: Muy mal, Mal, "
+            "Normal, Bien, Muy bien. None when not rated."
+        ),
+    )
+    feel_raw: int | None = Field(
+        default=None, description="Garmin directWorkoutFeel: 0/25/50/75/100."
+    )
+    rpe: int | None = Field(
+        default=None,
+        description="Perceived effort 1-10 rated on the watch (Garmin directWorkoutRpe / 10).",
+    )
 
 
 class ActivityList(_StrictBase):
@@ -93,6 +107,20 @@ class ActivityDetail(_StrictBase):
     max_speed_mps: float | None = None
     training_effect_aerobic: float | None = None
     training_effect_anaerobic: float | None = None
+    feel: str | None = Field(
+        default=None,
+        description=(
+            "How the athlete felt, rated on the watch after the activity: Muy mal, Mal, "
+            "Normal, Bien, Muy bien. None when not rated."
+        ),
+    )
+    feel_raw: int | None = Field(
+        default=None, description="Garmin directWorkoutFeel: 0/25/50/75/100."
+    )
+    rpe: int | None = Field(
+        default=None,
+        description="Perceived effort 1-10 rated on the watch (Garmin directWorkoutRpe / 10).",
+    )
     splits: list[ActivitySplit] = Field(default_factory=list)
     hr_zones: list[HRZone] = Field(default_factory=list)
 
@@ -346,7 +374,9 @@ class StrengthSet(_StrictBase):
         default=None, description="Garmin's recognised exercise, e.g. LEG_PRESS; null if unknown."
     )
     category: str | None = None
-    reps: int | None = None
+    reps: int | None = Field(
+        default=None, description="None for a timed / distance set; see duration_seconds."
+    )
     weight_kg: float | None = None
     weight_lb: float | None = None
     duration_seconds: float | None = None
@@ -360,6 +390,10 @@ class StrengthExerciseSummary(_StrictBase):
     category: str | None = None
     sets: int = 0
     total_reps: int = 0
+    total_seconds: float | None = Field(
+        default=None,
+        description="Sum of set durations for timed / distance sets (sled push, row), seconds.",
+    )
     max_weight_kg: float | None = None
     max_weight_lb: float | None = None
 
@@ -440,13 +474,40 @@ class StrengthExerciseInput(BaseModel):
     catalog; pass ``exercise_name``+``category`` to override the resolver."""
 
     name: str = Field(description="Exercise name, free text, e.g. 'Incline DB Press'.")
-    reps: int | None = Field(default=None, description="Target reps; omit if time-based.")
-    seconds: int | None = Field(default=None, description="Hold/work seconds (planks, carries).")
+    reps: int | None = Field(
+        default=None,
+        ge=1,
+        le=500,
+        description="Target reps. Give exactly one of reps/seconds/meters.",
+    )
+    seconds: int | None = Field(
+        default=None,
+        ge=5,
+        le=3600,
+        description=(
+            "Timed set in seconds (plank, sled push 60 s). The watch counts down and "
+            "closes the set by itself. Can carry a weight."
+        ),
+    )
+    meters: float | None = Field(
+        default=None,
+        ge=10,
+        le=10000,
+        description="Distance set in metres (1000 m treadmill, 500 m row) for Hyrox-style work.",
+    )
     weight: float | None = Field(
-        default=None, description="Optional load; omit to log on the watch."
+        default=None, ge=0, le=1000, description="Optional load; omit to log on the watch."
     )
     weight_unit: str = Field(
-        default="pound", description="Weight unit: 'pound'/'lb' or 'kilogram'/'kg'."
+        default="kilogram", description="Weight unit: 'kilogram'/'kg' (default) or 'pound'/'lb'."
+    )
+    display_name: str | None = Field(
+        default=None,
+        max_length=24,
+        description=(
+            "Name shown on the watch, e.g. Spanish 'Hiperextension'. Leads the step note. "
+            "Keep it short (<= 22 characters fit on the screen)."
+        ),
     )
     note: str | None = Field(
         default=None, description="Step note shown on the watch (e.g. rep range, RPE)."
@@ -462,11 +523,27 @@ class StrengthExerciseInput(BaseModel):
         return normalize_weight_unit(v)
 
 
+class StrengthWarmupInput(BaseModel):
+    """One lighter set of the block's FIRST exercise before the working sets."""
+
+    reps: int = Field(ge=1, le=100, description="Warm-up reps.")
+    weight: float | None = Field(
+        default=None, ge=0, le=1000, description="Warm-up load in the exercise's unit."
+    )
+
+
 class StrengthBlockInput(BaseModel):
     """A repeat group: ``sets`` rounds of ``exercises`` (>1 exercise = superset)."""
 
-    sets: int = Field(description="Number of sets (repeat-group iterations).")
+    sets: int = Field(ge=1, le=20, description="Number of sets (repeat-group iterations).")
     exercises: list[StrengthExerciseInput]
+    warmup: StrengthWarmupInput | None = Field(
+        default=None,
+        description=(
+            "Optional warm-up set of the first exercise, followed by the block's rest. "
+            "Counts as part of this block."
+        ),
+    )
     rest_seconds: int | None = Field(
         default=None,
         ge=5,
@@ -482,7 +559,10 @@ class StrengthBlockInput(BaseModel):
 class StrengthWorkoutInput(BaseModel):
     name: str = Field(description="Workout name shown in Garmin Connect.")
     blocks: list[StrengthBlockInput]
-    include_warmup: bool = Field(default=True, description="Prepend a lap-button warmup step.")
+    include_warmup: bool = Field(
+        default=False,
+        description="Prepend a generic lap-button warmup step. Prefer a block 'warmup' set.",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -608,6 +688,12 @@ class RunningWorkoutInput(BaseModel):
             "Ordered steps and/or repeat groups. Typical: [warmup, repeat group, cooldown]."
         )
     )
+
+
+class CyclingWorkoutInput(RunningWorkoutInput):
+    """A cycling workout: same steps as running (warmup/active/cooldown, time or
+    distance, repeat groups) with an optional heart-rate range per step instead
+    of a pace, e.g. a 2 h 30 long ride at 119-139 bpm."""
 
 
 class RunningWorkoutPreview(_StrictBase):

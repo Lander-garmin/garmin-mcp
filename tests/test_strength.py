@@ -203,7 +203,7 @@ def test_weight_omitted_when_absent_included_when_present() -> None:
     curl = steps[1]["workoutSteps"][0]
     assert "weightValue" not in bench
     assert curl["weightValue"] == 45.0
-    assert curl["weightUnit"]["unitKey"] == "pound"
+    assert curl["weightUnit"]["unitKey"] == "kilogram"  # kg is the default
 
 
 def test_seconds_uses_time_end_condition() -> None:
@@ -217,22 +217,18 @@ def test_seconds_uses_time_end_condition() -> None:
     assert work["endConditionValue"] == 30.0
 
 
-def test_set_without_reps_or_seconds_raises() -> None:
-    spec = StrengthWorkoutSpec(
-        name="t",
-        blocks=[BlockSpec(sets=2, exercises=[SetSpec("BENCH_PRESS", "BARBELL_BENCH_PRESS")])],
-    )
-    with pytest.raises(ValueError, match="reps or seconds"):
-        build_strength_workout(spec)
+def test_set_needs_exactly_one_end_condition() -> None:
+    with pytest.raises(ValueError, match="exactly one of reps, seconds or meters"):
+        SetSpec("BENCH_PRESS", "BARBELL_BENCH_PRESS")
+    with pytest.raises(ValueError, match="exactly one of reps, seconds or meters"):
+        SetSpec("SLED", "PUSH", reps=10, seconds=60)
 
 
-def test_warmup_step_added_by_default() -> None:
-    spec = StrengthWorkoutSpec(
-        name="t",
-        blocks=[
-            BlockSpec(sets=3, exercises=[SetSpec("BENCH_PRESS", "BARBELL_BENCH_PRESS", reps=8)])
-        ],
-    )
+def test_generic_warmup_step_is_opt_in() -> None:
+    block = BlockSpec(sets=3, exercises=[SetSpec("BENCH_PRESS", "BARBELL_BENCH_PRESS", reps=8)])
+    off = _steps(build_strength_workout(StrengthWorkoutSpec(name="t", blocks=[block])))[0]
+    assert off["type"] == "RepeatGroupDTO"
+    spec = StrengthWorkoutSpec(name="t", blocks=[block], include_warmup=True)
     first = _steps(build_strength_workout(spec))[0]
     assert first["stepType"]["stepTypeKey"] == "warmup"
     assert first["endCondition"]["conditionTypeId"] == 1  # lap.button

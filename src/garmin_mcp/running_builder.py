@@ -25,6 +25,7 @@ from .models import RunningRepeatInput, RunningStepInput, RunningWorkoutInput
 
 # --- Garmin enum constants ----------------------------------------------------
 _SPORT_RUNNING = {"sportTypeId": 1, "sportTypeKey": "running", "displayOrder": 1}
+_SPORT_CYCLING = {"sportTypeId": 2, "sportTypeKey": "cycling", "displayOrder": 2}
 
 _STEP_TYPES: dict[str, dict[str, Any]] = {
     "warmup": {"stepTypeId": 1, "stepTypeKey": "warmup", "displayOrder": 1},
@@ -176,8 +177,21 @@ def _executable_step(step: RunningStepInput, order: int) -> dict[str, Any]:
     return out
 
 
-def build_running_workout(workout: RunningWorkoutInput) -> dict[str, Any]:
+def build_cycling_workout(workout: RunningWorkoutInput) -> dict[str, Any]:
+    """Cycling workout: same step model as running, time/distance steps with an
+    optional heart-rate range (e.g. 119-139 bpm for a long Z2 ride). Pace
+    targets make no sense on a bike and are rejected."""
+    for step in _iter_steps(workout):
+        if step.pace_min_per_km or step.pace_max_per_km:
+            raise ValueError("Cycling steps take a heart-rate target (hr_min/max_bpm), not a pace.")
+    return build_running_workout(workout, sport=_SPORT_CYCLING)
+
+
+def build_running_workout(
+    workout: RunningWorkoutInput, sport: dict[str, Any] | None = None
+) -> dict[str, Any]:
     """Build the full ``upload_workout`` payload; raises ValueError on bad input."""
+    sport = sport or _SPORT_RUNNING
     if not workout.steps:
         raise ValueError("workout has no steps")
 
@@ -206,12 +220,12 @@ def build_running_workout(workout: RunningWorkoutInput) -> dict[str, Any]:
 
     payload: dict[str, Any] = {
         "workoutName": workout.name,
-        "sportType": _SPORT_RUNNING,
+        "sportType": sport,
         "estimatedDurationInSecs": estimate_duration_seconds(workout),
         "workoutSegments": [
             {
                 "segmentOrder": 1,
-                "sportType": _SPORT_RUNNING,
+                "sportType": sport,
                 "workoutSteps": steps,
             }
         ],
