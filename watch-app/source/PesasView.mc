@@ -45,6 +45,8 @@ class MainView extends WatchUi.View {
             drawLog(dc, m, cx, w, h);
         } else if (st == ST_REST) {
             drawRest(dc, m, cx, h);
+        } else if (st == ST_TIMER) {
+            drawTimer(dc, m, cx, h);
         } else if (st == ST_DONE) {
             small(dc, cx, h * 0.28, "ENTRENO TERMINADO");
             txt(dc, cx, h * 0.47, Graphics.FONT_MEDIUM, seriesText(m.sets.size()));
@@ -62,7 +64,7 @@ class MainView extends WatchUi.View {
         small(dc, cx, h * 0.24, m.free ? "SIN ENTRENO HOY" : "HOY");
         txt(dc, cx, h * 0.42, Graphics.FONT_MEDIUM, m.title());
         if (!m.free) {
-            small(dc, cx, h * 0.57, m.ex.size().format("%d") + " ejercicios");
+            small(dc, cx, h * 0.57, m.exerciseCount().format("%d") + " ejercicios");
         }
         small(dc, cx, h * 0.75, "START empezar");
         if (!m.free) {
@@ -70,35 +72,81 @@ class MainView extends WatchUi.View {
         }
     }
 
+    // "SERIE 2 DE 3", "CALENTAMIENTO", "SUPERSERIE 2 DE 3"
+    function setHeader(m) {
+        var b = m.block();
+        if (m.isWarmup()) {
+            return "CALENTAMIENTO";
+        }
+        if (m.isSuperset()) {
+            return "SUPERSERIE " + m.round().format("%d") + " DE " + b["s"].format("%d");
+        }
+        return "SERIE " + m.round().format("%d") + " DE " + b["s"].format("%d");
+    }
+
+    // "12 reps", "60 s", "500 m"
+    function targetText(e) {
+        if (e.hasKey("sec")) {
+            return e["sec"].format("%d") + " s";
+        }
+        if (e.hasKey("m")) {
+            return e["m"].format("%d") + " m";
+        }
+        if (e.hasKey("r")) {
+            return e["r"].format("%d") + " reps";
+        }
+        return "";
+    }
+
     function drawSet(dc, m, cx, h) {
         var e = m.current();
         if (m.free) {
-            small(dc, cx, h * 0.26, "SERIE " + m.setNo.format("%d"));
+            small(dc, cx, h * 0.26, "SERIE " + m.round().format("%d"));
             txt(dc, cx, h * 0.50, Graphics.FONT_MEDIUM, "Entrenando");
-        } else {
-            small(dc, cx, h * 0.20, "SERIE " + m.setNo.format("%d") + " DE " + e["s"].format("%d"));
-            name(dc, cx, h * 0.35, e["n"]);
-            var big = m.targetW != null ? fmtKg(m.targetW) + " kg" : m.targetReps().format("%d") + (m.isTimed() ? " s" : "");
-            txt(dc, cx, h * 0.55, Graphics.FONT_LARGE, big);
-            if (m.targetW != null) {
-                txt(dc, cx, h * 0.70, Graphics.FONT_SMALL, m.targetReps().format("%d") + (m.isTimed() ? " seg" : " reps"));
-            } else if (!m.isTimed()) {
-                small(dc, cx, h * 0.70, "reps");
-            }
+            small(dc, cx, h * 0.85, "START al terminar");
+            return;
         }
-        small(dc, cx, h * 0.85, "START al terminar");
+        small(dc, cx, h * 0.20, setHeader(m));
+        name(dc, cx, h * 0.35, e["n"]);
+        if (m.targetW != null) {
+            txt(dc, cx, h * 0.55, Graphics.FONT_LARGE, fmtKg(m.targetW) + " kg");
+            txt(dc, cx, h * 0.70, Graphics.FONT_SMALL, targetText(e));
+        } else {
+            txt(dc, cx, h * 0.57, Graphics.FONT_LARGE, targetText(e));
+        }
+        small(dc, cx, h * 0.85, m.isTimed() ? "START empezar" : "START al terminar");
+    }
+
+    // Timed set running (sled push 60 s): big countdown, closes by itself.
+    function drawTimer(dc, m, cx, h) {
+        var total = m.current()["sec"];
+        if (total > 0 && m.timerLeft > 0) {
+            dc.setColor(Graphics.COLOR_BLACK, Graphics.COLOR_TRANSPARENT);
+            dc.setPenWidth(5);
+            var deg = (360 * m.timerLeft / total).toNumber();
+            dc.drawArc(cx, h / 2, cx - 4, Graphics.ARC_CLOCKWISE, 90, 90 - deg);
+            dc.setPenWidth(1);
+        }
+        name(dc, cx, h * 0.24, m.current()["n"]);
+        txt(dc, cx, h * 0.48, Graphics.FONT_NUMBER_HOT, fmtTime(m.timerLeft));
+        if (m.targetW != null) {
+            small(dc, cx, h * 0.68, fmtKg(m.targetW) + " kg");
+        }
+        small(dc, cx, h * 0.86, "START parar");
     }
 
     // Like setting an alarm: the highlighted box is the one UP/DOWN changes.
     function drawLog(dc, m, cx, w, h) {
-        small(dc, cx, h * 0.20, "SERIE " + m.setNo.format("%d") + " HECHA");
+        small(dc, cx, h * 0.20, m.isWarmup() ? "CALENT. HECHO" : "SERIE HECHA");
         var top = (h * 0.32).toNumber();
         var bh = (h * 0.34).toNumber();
-        if (m.hasWeightField()) {
-            box(dc, cx - 82, top, 78, bh, m.isTimed() ? "SEG" : "REPS", m.logR.format("%d"), m.logField == 0);
+        if (m.hasRepsField() && m.hasWeightField()) {
+            box(dc, cx - 82, top, 78, bh, "REPS", m.logR.format("%d"), m.logField == 0);
             box(dc, cx + 4, top, 78, bh, "KG", fmtKg(m.logW), m.logField == 1);
+        } else if (m.hasRepsField()) {
+            box(dc, cx - 50, top, 100, bh, "REPS", m.logR.format("%d"), true);
         } else {
-            box(dc, cx - 50, top, 100, bh, m.isTimed() ? "SEG" : "REPS", m.logR.format("%d"), true);
+            box(dc, cx - 50, top, 100, bh, "KG", fmtKg(m.logW), true);
         }
         small(dc, cx, h * 0.76, "UP/DOWN cambiar");
         small(dc, cx, h * 0.86, "START ok");
@@ -114,10 +162,8 @@ class MainView extends WatchUi.View {
         }
         small(dc, cx, h * 0.24, "DESCANSO");
         txt(dc, cx, h * 0.45, Graphics.FONT_NUMBER_HOT, fmtTime(m.restLeft));
-        var e = m.current();
-        var next = m.free ? "Serie " + m.setNo.format("%d")
-            : (m.setNo > 1 ? "Serie " + m.setNo.format("%d") + " de " + e["s"].format("%d") : e["n"]);
-        small(dc, cx, h * 0.66, "SIGUE");
+        var next = m.free ? "Serie " + m.round().format("%d") : m.current()["n"];
+        small(dc, cx, h * 0.66, m.free ? "SIGUE" : setHeader(m));
         name(dc, cx, h * 0.75, next);
         small(dc, cx, h * 0.88, "START saltar");
     }
@@ -188,8 +234,10 @@ class MainDelegate extends WatchUi.BehaviorDelegate {
             m.logNext();
         } else if (st == ST_REST) {
             m.endRest();
+        } else if (st == ST_TIMER) {
+            m.stopTimed();
         } else if (st == ST_DONE) {
-            m.save();
+            WatchUi.pushView(new FeelMenu(), new FeelMenuDelegate(), WatchUi.SLIDE_UP);
         }
         return true;
     }

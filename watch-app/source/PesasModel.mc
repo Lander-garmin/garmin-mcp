@@ -14,29 +14,36 @@ import Toybox.WatchUi;
 // Screens
 const ST_LOADING = 0;   // looking for today's plan
 const ST_START = 1;     // plan (or free session) ready: START to begin
-const ST_SET = 2;       // doing a set: START when finished
+const ST_SET = 2;       // doing a set: START when finished (timed set: START = play)
 const ST_LOG = 3;       // note reps and kg of the set just done
 const ST_REST = 4;      // rest countdown
-const ST_DONE = 5;      // all sets done: START to save
+const ST_DONE = 5;      // all sets done: START to rate and save
 const ST_SAVED = 6;     // saved
+const ST_TIMER = 7;     // timed set running: countdown, closes by itself
 
 const WEIGHT_STEP = 2.5;
 const REST_BETWEEN_EXERCISES = 90;
 
+// The plan comes as blocks: {"s" sets, "rest" s, "x" [exercises], "wu" 1 = warm-up}.
+// A block with several exercises is a superset: x[0], x[1], ... then the rest,
+// "s" rounds. The walk is precomputed as a list of [block, exercise, round].
 class PesasModel {
     var state = ST_LOADING;
     var plan = null;
-    var ex = [];
+    var blocks = [];
+    var seq = [];
+    var pos = 0;
     var free = false;
     var offline = false;
-    var exIdx = 0;
-    var setNo = 1;
-    var targetW = null;       // kg for the next set (null = bodyweight)
+    var targetW = null;       // kg for the current set (null = bodyweight)
+    var lastW = {};           // block*100+exercise -> kg used last time
     var logField = 0;         // 0 = reps, 1 = kg
     var logR = 0;
     var logW = null;
     var restTotal = 0;
     var restLeft = 0;
+    var timerLeft = 0;
+    var timedDone = 0;        // seconds a timed set actually lasted
     var sets = [];
     var session = null;
     var fieldEx = null;
@@ -48,6 +55,8 @@ class PesasModel {
     var finalElapsed = 0;
     var timer = null;
     var sendStatus = "";
+    var feel = null;
+    var rpe = null;
 
     function initialize() {
     }
@@ -60,7 +69,7 @@ class PesasModel {
         state = ST_LOADING;
         Communications.makeWebRequest(
             Secrets.SERVER_URL + "/watch/today",
-            {"k" => Secrets.WATCH_KEY, "date" => localDate()},
+            {"k" => Secrets.WATCH_KEY, "date" => localDate(), "v" => 2},
             {
                 :method => Communications.HTTP_REQUEST_METHOD_GET,
                 :responseType => Communications.HTTP_RESPONSE_CONTENT_TYPE_JSON
@@ -87,24 +96,77 @@ class PesasModel {
         WatchUi.requestUpdate();
     }
 
+    // Accepts the block format (v2) and the old one-entry-per-exercise list.
+    function planBlocks(data) {
+        if (data == null || data.hasKey("none")) {
+            return [];
+        }
+        if (data["b"] instanceof Array) {
+            return data["b"];
+        }
+        var out = [];
+        var old = data["ex"];
+        if (old instanceof Array) {
+            for (var i = 0; i < old.size(); i += 1) {
+                var e = old[i];
+                out.add({"s" => e["s"], "rest" => e["rest"], "x" => [e]});
+            }
+        }
+        return out;
+    }
+
     function usePlan(data) {
-        if (data != null && !data.hasKey("none") && data["ex"] != null && data["ex"].size() > 0) {
+        blocks = planBlocks(data);
+        if (blocks.size() > 0) {
             plan = data;
-            ex = data["ex"];
             free = false;
         } else {
             plan = null;
             free = true;
-            ex = [{"n" => "Ejercicio", "c" => "UNKNOWN", "e" => "UNKNOWN", "s" => 999, "rest" => 0}];
+            blocks = [{"s" => 999, "rest" => 0, "x" => [{"n" => "Ejercicio", "c" => "UNKNOWN", "e" => "UNKNOWN"}]}];
         }
-        exIdx = 0;
-        setNo = 1;
-        targetW = current().hasKey("w") ? current()["w"].toFloat() : null;
+        seq = [];
+        for (var b = 0; b < blocks.size(); b += 1) {
+            var rounds = blocks[b]["s"];
+            var n = blocks[b]["x"].size();
+            for (var r = 1; r <= rounds; r += 1) {
+                for (var x = 0; x < n; x += 1) {
+                    seq.add([b, x, r]);
+                }
+            }
+        }
+        pos = 0;
+        lastW = {};
+        loadTarget();
         state = ST_START;
     }
 
+    function block() {
+        return blocks[seq[pos][0]];
+    }
+
     function current() {
-        return ex[exIdx];
+        return block()["x"][seq[pos][1]];
+    }
+
+    function round() {
+        return seq[pos][2];
+    }
+
+    function isWarmup() {
+        return block().hasKey("wu");
+    }
+
+    function isSuperset() {
+        return block()["x"].size() > 1;
+    }
+
+    function isTimed() {
+        return current().hasKey("sec");
+    }
+
+    function isDistance() {
+        return current().hasKey("m");
     }
 
     function targetReps() {
@@ -112,27 +174,45 @@ class PesasModel {
         if (e.hasKey("r")) {
             return e["r"];
         }
-        if (e.hasKey("sec")) {
-            return e["sec"];
-        }
         return 0;
     }
 
-    function isTimed() {
-        return current().hasKey("sec");
+    function key() {
+        return seq[pos][0] * 100 + seq[pos][1];
     }
 
-    // "Plan X 30/09 Gym Push 70 min" -> "Push"
+    // Weight for the current set: what was used last time on this exercise, else the plan.
+    function loadTarget() {
+        var e = current();
+        if (lastW.hasKey(key())) {
+            targetW = lastW[key()];
+        } else {
+            targetW = e.hasKey("w") ? e["w"].toFloat() : null;
+        }
+    }
+
+    // Number of exercises in the plan (warm-up sets not counted).
+    function exerciseCount() {
+        var n = 0;
+        for (var b = 0; b < blocks.size(); b += 1) {
+            if (!blocks[b].hasKey("wu")) {
+                n += blocks[b]["x"].size();
+            }
+        }
+        return n;
+    }
+
+    // "Plan X 30/09 Pesas Push 70 min" -> "Push"
     function title() {
         if (plan == null) {
             return "Sesion libre";
         }
         var n = plan["name"];
-        var i = n.find("Gym ");
-        var skip = 4;
+        var i = n.find("Pesas ");
+        var skip = 6;
         if (i == null) {
-            i = n.find("Pesas ");
-            skip = 6;
+            i = n.find("Gym ");
+            skip = 4;
         }
         if (i == null) {
             return n.length() > 16 ? n.substring(0, 16) : n;
@@ -143,7 +223,7 @@ class PesasModel {
     }
 
     function activityName() {
-        return plan == null ? "Gym" : "Gym " + title();
+        return plan == null ? "Pesas" : "Pesas " + title();
     }
 
     // ------------------------------------------------------------------
@@ -182,21 +262,54 @@ class PesasModel {
         return (System.getTimer() - startMs) / 1000;
     }
 
-    // START on the set screen: the set is done, now note reps and kg.
+    // START on the set screen.
     function setDone() {
+        if (isTimed()) {
+            // Play: the countdown runs and closes the set by itself.
+            setStart = Time.now().value();
+            timerLeft = current()["sec"];
+            state = ST_TIMER;
+            buzz(1);
+            WatchUi.requestUpdate();
+            return;
+        }
+        afterSet();
+    }
+
+    // START during a timed set: stop it early.
+    function stopTimed() {
+        finishTimed();
+    }
+
+    function finishTimed() {
+        timedDone = Time.now().value() - setStart;
+        afterSet();
+    }
+
+    // The set is over: note what was done (reps and/or kg), or confirm directly.
+    function afterSet() {
         logR = targetReps();
         logW = targetW;
         if (free) {
             logW = 0.0;
             if (sets.size() > 0) {
                 var last = sets[sets.size() - 1];
-                logR = last["r"];
+                logR = last.hasKey("r") ? last["r"] : 0;
                 logW = last.hasKey("w") ? last["w"] : 0.0;
             }
         }
-        logField = 0;
+        var repsField = !isTimed() && !isDistance();
+        if (!repsField && logW == null) {
+            confirmSet();   // timed / distance set without weight: nothing to note
+            return;
+        }
+        logField = repsField ? 0 : 1;
         state = ST_LOG;
         WatchUi.requestUpdate();
+    }
+
+    function hasRepsField() {
+        return !isTimed() && !isDistance();
     }
 
     function hasWeightField() {
@@ -235,29 +348,52 @@ class PesasModel {
     function confirmSet() {
         var now = Time.now().value();
         var e = current();
-        var s = {"c" => e["c"], "e" => e["e"], "r" => logR, "t" => setStart, "d" => now - setStart};
+        var s = {"c" => e["c"], "e" => e["e"], "n" => e["n"], "t" => setStart};
+        if (isTimed()) {
+            s["sec"] = e["sec"];
+            s["d"] = timedDone;
+        } else if (isDistance()) {
+            s["m"] = e["m"];
+            s["d"] = now - setStart;
+        } else {
+            s["r"] = logR;
+            s["d"] = now - setStart;
+        }
         if (logW != null && !(free && logW == 0.0)) {
             s["w"] = logW;
         }
         sets.add(s);
         writeLap(e["n"], s);
         if (logW != null) {
-            targetW = logW;   // keep the weight actually used for the next set
+            lastW[key()] = logW;   // keep the weight actually used for the next round
         }
+        advance();
+        WatchUi.requestUpdate();
+    }
 
-        if (setNo < e["s"]) {
-            setNo += 1;
-            startRest(e["rest"]);
-        } else if (exIdx + 1 < ex.size()) {
-            exIdx += 1;
-            setNo = 1;
-            targetW = current().hasKey("w") ? current()["w"].toFloat() : null;
-            startRest(e["rest"] > 0 ? e["rest"] : REST_BETWEEN_EXERCISES);
-        } else {
+    // Next step of the walk: next exercise of the superset, or the rest.
+    function advance() {
+        if (pos + 1 >= seq.size()) {
             state = ST_DONE;
             buzz(2);
+            return;
         }
-        WatchUi.requestUpdate();
+        var b = block();
+        var lastOfRound = seq[pos][1] == b["x"].size() - 1;
+        var nextBlock = seq[pos + 1][0] != seq[pos][0];
+        pos += 1;
+        loadTarget();
+        if (!lastOfRound) {
+            setStart = Time.now().value();
+            state = ST_SET;   // superset: straight to the next exercise
+            buzz(0);
+            return;
+        }
+        var rest = b["rest"];
+        if (rest == 0 && nextBlock) {
+            rest = REST_BETWEEN_EXERCISES;
+        }
+        startRest(rest);
     }
 
     function writeLap(name, s) {
@@ -265,7 +401,7 @@ class PesasModel {
             return;
         }
         fieldEx.setData(name.length() > 23 ? name.substring(0, 23) : name);
-        fieldReps.setData(s["r"]);
+        fieldReps.setData(s.hasKey("r") ? s["r"] : 0);
         fieldKg.setData(s.hasKey("w") ? s["w"] : 0.0);
         session.addLap();
     }
@@ -297,17 +433,31 @@ class PesasModel {
             } else {
                 restLeft += 1;   // free rest: count up
             }
+        } else if (state == ST_TIMER) {
+            timerLeft -= 1;
+            if (timerLeft <= 0) {
+                buzz(2);
+                finishTimed();
+                return;
+            }
+            if (timerLeft == 10) {
+                buzz(0);
+            }
         }
         WatchUi.requestUpdate();
     }
 
+    // Pause menu: skip what is left of the current block.
     function skipExercise() {
-        if (free || exIdx + 1 >= ex.size()) {
+        var b = seq[pos][0];
+        while (pos < seq.size() && seq[pos][0] == b) {
+            pos += 1;
+        }
+        if (free || pos >= seq.size()) {
+            pos = seq.size() - 1;
             state = ST_DONE;
         } else {
-            exIdx += 1;
-            setNo = 1;
-            targetW = current().hasKey("w") ? current()["w"].toFloat() : null;
+            loadTarget();
             setStart = Time.now().value();
             state = ST_SET;
         }
@@ -319,6 +469,13 @@ class PesasModel {
             timer.stop();
             timer = null;
         }
+    }
+
+    // After the rating menus (feel / effort); nulls when skipped.
+    function saveRated(f, r) {
+        feel = f;
+        rpe = r;
+        save();
     }
 
     function save() {
@@ -335,7 +492,14 @@ class PesasModel {
             sendStatus = "";
         } else {
             sendStatus = "Enviando...";
-            sendLog({"start" => startEpoch, "dur" => finalElapsed, "name" => activityName(), "sets" => sets});
+            var body = {"start" => startEpoch, "dur" => finalElapsed, "name" => activityName(), "sets" => sets};
+            if (feel != null) {
+                body["feel"] = feel;
+            }
+            if (rpe != null) {
+                body["rpe"] = rpe;
+            }
+            sendLog(body);
         }
         WatchUi.requestUpdate();
     }
