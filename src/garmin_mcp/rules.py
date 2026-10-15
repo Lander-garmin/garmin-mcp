@@ -35,16 +35,16 @@ def week_letter(day: dt.date) -> str:
 
 
 def _sessions(letter: str) -> list[list[str]]:
-    """Default sessions per weekday (Mon..Sun); durations are the rule defaults."""
+    """Default sessions per weekday (Mon..Sun); distances are the base-week defaults."""
     wednesday = "Pesas Legs 65 min" if letter == "A" else "Pesas Hyrox 55 min"
     return [
         [],
-        ["Pesas Pull 65 min", "Rodaje suave 35 min"],
+        ["Pesas Pull 65 min", "Rodaje 12 km"],
         [wednesday],
         ["Pesas Push 65 min"],
-        ["Series 4x1000"],
+        ["Series 5x1000"],
         ["Bici larga 2h30"],
-        ["Tirada larga"],
+        ["Tirada larga 18 km"],
     ]
 
 

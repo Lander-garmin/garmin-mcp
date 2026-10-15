@@ -17,12 +17,12 @@ La letra de la semana la calcula `get_training_rules` (19-25/10/2026 = B; despu�
 | Día | Hora | Sesión |
 |---|---|---|
 | L | — | Descanso total. Nunca se programa nada. |
-| M | 17:30 | Pesas Pull + rodaje suave 35 min justo después (119-139 ppm, 5:35-6:05 min/km) |
+| M | 17:30 | Pesas Pull + rodaje de 12 km justo después, por pulso: media ≤145 ppm, sin objetivo de ritmo |
 | X | 17:30 | Semana A: Pesas Legs · Semana B: Pesas Hyrox |
 | J | 17:30 | Pesas Push |
-| V | 18:30 | Series: 10' calentamiento + 4x1000 a 4:05-4:15 con 2' de recuperación + 5' vuelta a la calma |
-| S | 10:00 | Bici larga 2 h - 2 h 30 a 119-139 ppm |
-| D | 10:00 | Tirada larga a 5:10-5:40 min/km |
+| V | 18:30 | Series: 20' calentamiento + 5x1000 a 4:05-4:15 con 2' de recuperación + 10' vuelta a la calma (~10 km) |
+| S | 10:00 | Bici larga 2 h 30 a 119-139 ppm |
+| D | 10:00 | Tirada larga de 18 km por pulso: media 145-155 ppm, nunca por encima de 159, sin objetivo de ritmo |
 
 - Nombres en el calendario: "Plan <letra día> <dd/mm> <descripción>". Ejemplo:
   "Plan X 21/10 Pesas Hyrox 55 min". Las sesiones de fuerza llevan SIEMPRE la palabra "Pesas".
@@ -111,8 +111,13 @@ Fuerza: `preview_strength_workout` -> revisar -> `create_strength_workout` con e
 | Remo ergómetro | ROW | INDOOR_ROW | Remo ergometro |
 | Wall balls | SQUAT | WALL_BALL | Wall balls |
 
-Carrera: `preview_running_workout` / `create_running_workout`. Rodajes suaves y tirada larga con
-`hr_min_bpm: 119`, `hr_max_bpm: 139` solo si es Z2; series con ritmo. Bici:
+Carrera: `preview_running_workout` / `create_running_workout`:
+- Rodaje: paso por distancia (`distance_meters`), `hr_min_bpm: 119`, `hr_max_bpm: 145`, sin ritmo.
+- Tirada larga: paso por distancia (`distance_meters`), `hr_min_bpm: 145`, `hr_max_bpm: 155`, sin
+  ritmo. La nota indica "máximo 159".
+- Series: por ritmo, como ahora.
+
+Bici:
 `preview_cycling_workout` / `create_cycling_workout` con pasos por tiempo y 119-139 ppm.
 
 ## Revisión semanal de entrenador (cada domingo, antes de crear la semana siguiente)
@@ -131,17 +136,24 @@ REGLAS DE DECISIÓN (sube / mantiene / baja):
   - Falla dos semanas seguidas -> baja un 10 %.
   - Excepciones: sentadilla fija en 80 kg; trineo +10 kg solo si completa los 60 s sin parar
     (tope 152 kg); dominadas, lastre solo tras 3x12 limpias.
-- Rodajes suaves y bici:
-  - Pulso medio <= 139 dentro del rango de ritmo -> se mantiene o sube volumen.
+- Rodaje:
+  - Pulso medio <= 145 -> +1 km la semana siguiente, hasta un tope de 14 km.
+  - Pulso medio por encima de 145 -> misma distancia y aviso.
+- Bici:
+  - Pulso medio <= 139 -> se mantiene o sube volumen.
   - Pulso por encima de 139 -> misma duración y aviso de bajar el ritmo.
 - Series:
   - Ritmo en objetivo, pulso de recuperación por debajo de 150 y RPE <= 8 -> progresa
     (5x1000 o 4:00-4:05).
   - Si no se cumple -> repite la misma sesión.
 - Tirada larga:
-  - Deriva de pulso controlada y RPE <= 6 -> +1-2 km.
-  - Si no se cumple -> repite.
-- Volumen de carrera: como máximo +10 % por semana.
+  - Pulso medio <= 155, máximo <= 159 y RPE <= 6 -> +1-2 km, hasta 21 km.
+  - Si no se cumple -> se repite.
+  - Una vez al mes (último domingo del mes) la tirada es un medio maratón completo (21,1 km) con
+    las mismas condiciones de pulso. Excepción: el domingo 25/10/2026 (semana base) lleva 18 km;
+    el primer medio maratón es el 29/11/2026.
+- Volumen de carrera: la semana del 19-25/10/2026 es la semana base, con unos 40 km. Desde ahí,
+  como máximo +10 % por semana.
 - Pulso en reposo 3 o más ppm por encima de la base durante 2 días, o RPE alto en sesiones
   suaves -> semana de mantenimiento o descarga, sin subir nada.
 - Si falta la valoración del reloj en una sesión, decide solo con datos objetivos y señálalo.
