@@ -15,6 +15,7 @@ Every tool here is read-only; the client-side allowlist enforces that.
 
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 import math
 from typing import Any
@@ -23,7 +24,7 @@ from pydantic import Field
 
 from garmin_mcp import server as _s
 from garmin_mcp.cache import TTLCache
-from garmin_mcp.garmin_client import GarminClientError
+from garmin_mcp.garmin_client import GarminClientError, error_note
 from garmin_mcp.models import _StrictBase
 
 mcp = _s.mcp
@@ -44,7 +45,16 @@ class GarminData(_StrictBase):
     source: str = Field(description="Garmin Connect API method the data came from.")
     params: dict[str, Any] = Field(default_factory=dict, description="Parameters used.")
     data: Any = Field(default=None, description="Compacted Garmin payload; null if unavailable.")
-    note: str | None = Field(default=None, description="Explains missing data or truncation.")
+    status: str = Field(
+        default="ok",
+        description=(
+            "ok = data returned; empty = Garmin answered OK with no data; "
+            "error = the call failed (literal error in note)."
+        ),
+    )
+    note: str | None = Field(
+        default=None, description="Explains missing data, errors or truncation."
+    )
 
 
 class HeartRateReading(_StrictBase):
@@ -64,6 +74,10 @@ class HeartRateTimeline(_StrictBase):
     )
     last_reading_time: str | None = Field(default=None, description="Local time of last reading.")
     readings_count: int = Field(default=0, description="Number of raw readings Garmin returned.")
+    status: str = Field(
+        default="ok",
+        description="ok / empty (Garmin OK but no readings) / error (call failed, see note).",
+    )
     readings: list[HeartRateReading] = Field(
         default_factory=list, description="Downsampled intraday readings (~2 min apart)."
     )
@@ -119,28 +133,37 @@ async def _fetch(
         client = _s._get_garmin()
         raw = await client.call(method, *args, **kwargs)
         data = transform(raw) if transform else raw
-        note = None
         if _is_empty(data):
-            note = "Garmin returned no data for this request (not recorded, or watch not synced)."
-        return GarminData(source=method, params=params, data=_compact(data, max_items), note=note)
+            return GarminData(
+                source=method,
+                params=params,
+                data=_compact(data, max_items),
+                status="empty",
+                note="Garmin answered OK with no data (not recorded, or the watch has not synced).",
+            )
+        return GarminData(source=method, params=params, data=_compact(data, max_items))
 
     try:
         result: GarminData = await _s._cache.get_or_compute(cache_key, ttl, compute)
     except GarminClientError as exc:
         log.warning("extra_tool.failed", tool=tool, method=method, error=str(exc)[:200])
         return GarminData(
-            source=method,
-            params=params,
-            data=None,
-            note=f"Garmin call failed: {str(exc)[:200]}",
+            source=method, params=params, data=None, status="error", note=error_note(exc)
         )
     return result
 
 
 def _parse_heart_rates(raw: Any, date: str, max_points: int) -> HeartRateTimeline:
     if not isinstance(raw, dict):
-        return HeartRateTimeline(date=date, note="No heart rate data returned for this date.")
+        return HeartRateTimeline(
+            date=date,
+            status="empty",
+            note="Garmin answered OK with no heart rate payload for this date.",
+        )
     values = raw.get("heartRateValues") or []
+    # Reading timestamps are UTC; shift them with the offset Garmin itself
+    # reports for this day (the server's own clock is UTC on Render).
+    offset = _s._utc_offset(raw.get("startTimestampGMT"), raw.get("startTimestampLocal"))
     readings: list[HeartRateReading] = []
     for entry in values:
         if not isinstance(entry, (list, tuple)) or len(entry) < 2:
@@ -148,7 +171,7 @@ def _parse_heart_rates(raw: Any, date: str, max_points: int) -> HeartRateTimelin
         ts, bpm = entry[0], entry[1]
         if bpm is None or ts is None:
             continue
-        local = _s._seconds_to_iso_local(ts)
+        local = _s._epoch_ms_to_local_iso(ts, offset)
         if local is None:
             continue
         readings.append(HeartRateReading(time=local, bpm=int(bpm)))
@@ -163,8 +186,13 @@ def _parse_heart_rates(raw: Any, date: str, max_points: int) -> HeartRateTimelin
         readings = sampled
 
     note = None
+    status = "ok"
     if total == 0:
-        note = "No intraday readings: the watch may not have synced yet for this date."
+        status = "empty"
+        note = (
+            f"Garmin answered OK but returned no heart-rate readings for {date} "
+            "(heartRateValues empty): the watch did not record or upload wrist heart rate."
+        )
     elif date == _s._today_iso() and last is not None:
         note = (
             "last_reading is the newest value the watch has synced to Garmin Connect; "
@@ -187,6 +215,7 @@ def _parse_heart_rates(raw: Any, date: str, max_points: int) -> HeartRateTimelin
         last_reading_time=last.time if last else None,
         readings_count=total,
         readings=readings,
+        status=status,
         note=note,
     )
 
@@ -277,23 +306,115 @@ async def get_heart_rate_timeline(
         return _parse_heart_rates(raw, target_date, max_points)
 
     ttl = 300 if target_date == _s._today_iso() else _SLOW_TTL
-    result: HeartRateTimeline = await _s._cache.get_or_compute(cache_key, ttl, fetch)
+    try:
+        result: HeartRateTimeline = await _s._cache.get_or_compute(cache_key, ttl, fetch)
+    except GarminClientError as exc:
+        log.warning("hr_timeline.failed", date=target_date, error=str(exc)[:200])
+        return HeartRateTimeline(date=target_date, status="error", note=error_note(exc))
     return result
+
+
+async def _section(coro: Any) -> tuple[Any, str | None]:
+    """Run one summary section; (value, error) with the literal error, never raising."""
+    try:
+        value = await coro
+    except Exception as exc:  # each section is independent; report, don't sink the call
+        return None, error_note(exc)
+    if getattr(value, "status", "ok") == "error":
+        return None, str(getattr(value, "note", "") or "error")
+    return value, None
 
 
 @mcp.tool()
 async def get_daily_summary(date: str | None = None) -> GarminData:
     """Everything Garmin records for one day in a single call.
 
-    Steps, distance, calories (active/BMR/total), floors, intensity minutes,
-    heart rate (resting/min/max/last), stress, Body Battery, SpO2, respiration,
-    sleep seconds and more. Best first call for "how was my day".
+    The daily summary (steps, distance, calories, floors, intensity minutes,
+    sleepingSeconds, lastSyncTimestampGMT, ...) plus three sections fetched in
+    parallel: ``heart_rate`` (resting/min/max/last reading), ``stress``
+    (average/max and minutes per zone) and ``body_battery`` (max/min/current,
+    charged/drained). Each section carries its own ``status`` (ok / empty /
+    error); a section that fails is null, named in ``sections_unavailable``
+    and its literal error is in ``section_errors``.
 
     Args:
         date: Calendar date in YYYY-MM-DD format. Defaults to today.
     """
     d = _s._normalise_date(date, _s._today_iso())
-    return await _fetch("get_daily_summary", "get_user_summary", d, params={"date": d})
+    base, hr, stress, battery = await asyncio.gather(
+        _fetch("get_daily_summary", "get_user_summary", d, params={"date": d}, ttl=300),
+        _section(get_heart_rate_timeline(d, max_points=10)),
+        _section(_s.get_stress(d)),
+        _section(_s.get_body_battery(d)),
+    )
+    data: dict[str, Any] = dict(base.data) if isinstance(base.data, dict) else {}
+    unavailable: list[str] = []
+    errors: dict[str, str] = {}
+    if base.status == "error":
+        unavailable.append("summary")
+        errors["summary"] = base.note or "error"
+
+    hr_value, hr_error = hr
+    if hr_value is not None:
+        data["heart_rate"] = {
+            "status": hr_value.status,
+            "resting_hr": hr_value.resting_hr,
+            "min_hr": hr_value.min_hr,
+            "max_hr": hr_value.max_hr,
+            "last_reading_bpm": hr_value.last_reading_bpm,
+            "last_reading_time": hr_value.last_reading_time,
+            "readings_count": hr_value.readings_count,
+            "note": hr_value.note,
+        }
+    stress_value, stress_error = stress
+    if stress_value is not None:
+        empty = stress_value.avg_stress is None and not any(
+            b.stress_level is not None and b.stress_level >= 0 for b in stress_value.timeline
+        )
+        data["stress"] = {
+            "status": "empty" if empty else "ok",
+            **stress_value.model_dump(exclude={"timeline", "date"}),
+        }
+    battery_value, battery_error = battery
+    if battery_value is not None:
+        # Garmin can send a timeline whose values are all null: still no data.
+        empty = battery_value.max_value is None and not any(
+            r.value is not None for r in battery_value.timeline
+        )
+        data["body_battery"] = {
+            "status": "empty" if empty else "ok",
+            **battery_value.model_dump(exclude={"timeline", "date"}),
+        }
+    for name, error in (
+        ("heart_rate", hr_error),
+        ("stress", stress_error),
+        ("body_battery", battery_error),
+    ):
+        if error is not None:
+            data[name] = None
+            unavailable.append(name)
+            errors[name] = error
+    data["sections_unavailable"] = unavailable
+    data["section_errors"] = errors
+
+    empties = [
+        name
+        for name in ("heart_rate", "stress", "body_battery")
+        if isinstance(data.get(name), dict) and data[name].get("status") == "empty"
+    ]
+    notes = [n for n in (base.note,) if n]
+    if empties:
+        notes.append("Garmin answered OK but with no data for: " + ", ".join(empties) + ".")
+    if unavailable:
+        notes.append("Failed: " + ", ".join(unavailable) + " (see section_errors).")
+    status = "error" if base.status == "error" and not data else base.status
+    return GarminData(
+        source="get_user_summary+heart_rate+stress+body_battery",
+        params={"date": d},
+        data=data,
+        status=status,
+        note=" ".join(notes) or None,
+    )
 
 
 @mcp.tool()
@@ -793,24 +914,50 @@ async def get_badges() -> GarminData:
 
 @mcp.tool()
 async def get_devices() -> GarminData:
-    """Registered Garmin devices and the last-used device with its last sync time.
+    """Registered Garmin devices, the last-used one, and two sync times (local time).
 
-    Use this to know how fresh the data is: if the watch has not synced
-    recently, intraday values will be stale.
+    To know whether TODAY's data is fresh, look at ``last_sync_time``: when the
+    watch last synced today's wellness data (steps, sleep, heart rate) to Garmin
+    Connect, from the daily summary's lastSyncTimestampGMT. If it is null the
+    watch has not synced anything for today yet.
+
+    ``device_upload_time`` (lastUsedDeviceUploadTime of the device endpoint) is
+    the last file upload from the device; it can be an older batch, so do not
+    use it to judge freshness. Both are local wall-clock times, converted with
+    the UTC offset Garmin reports for the account (``utc_offset``).
     """
+    today = _s._today_iso()
     devices = await _fetch("get_devices.list", "get_devices", ttl=_SLOW_TTL)
     last_used = await _fetch("get_devices.last_used", "get_device_last_used", ttl=300)
-    sync_iso = None
+    summary = await _fetch(
+        "get_devices.today_summary", "get_user_summary", today, params={"date": today}, ttl=300
+    )
+    day = summary.data if isinstance(summary.data, dict) else {}
+    offset = _s._utc_offset(day.get("wellnessStartTimeGmt"), day.get("wellnessStartTimeLocal"))
+    upload = None
     if isinstance(last_used.data, dict):
-        sync_iso = _s._seconds_to_iso_local(last_used.data.get("lastUsedDeviceUploadTime"))
-    notes = [n for n in (devices.note, last_used.note) if n]
+        upload = _s._epoch_ms_to_local_iso(last_used.data.get("lastUsedDeviceUploadTime"), offset)
+    last_sync = _s._gmt_to_local_iso(day.get("lastSyncTimestampGMT"), offset)
+    notes = [n for n in (devices.note, last_used.note, summary.note) if n]
+    if summary.status != "error" and last_sync is None:
+        notes.append(f"No sync recorded for {today} yet: today's data is not on Garmin Connect.")
+    offset_text = None
+    if offset is not None:
+        minutes = int(offset.total_seconds() // 60)
+        offset_text = (
+            f"{'+' if minutes >= 0 else '-'}{abs(minutes) // 60:02d}:{abs(minutes) % 60:02d}"
+        )
+    statuses = {devices.status, last_used.status, summary.status}
     return GarminData(
-        source="get_devices+get_device_last_used",
+        source="get_devices+get_device_last_used+get_user_summary",
         data={
             "devices": devices.data,
             "last_used": last_used.data,
-            "last_sync_local_time": sync_iso,
+            "last_sync_time": last_sync,
+            "device_upload_time": upload,
+            "utc_offset": offset_text,
         },
+        status="error" if "error" in statuses else "ok",
         note="; ".join(notes) or None,
     )
 

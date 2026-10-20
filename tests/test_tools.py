@@ -76,7 +76,9 @@ async def _reset_state() -> Any:
 
 @pytest.mark.asyncio
 async def test_get_sleep_parses_full_payload() -> None:
-    fake = FakeGarminClient({"get_sleep_data": SLEEP_PAYLOAD})
+    fake = FakeGarminClient(
+        {"get_sleep_data": SLEEP_PAYLOAD, "get_user_summary": {"sleepingSeconds": 28800}}
+    )
     server_module.set_garmin_client_for_testing(fake)
 
     result = await server_module.get_sleep(date="2026-05-07")
@@ -102,12 +104,15 @@ async def test_get_sleep_handles_missing_data() -> None:
 
 @pytest.mark.asyncio
 async def test_get_sleep_uses_cache() -> None:
-    fake = FakeGarminClient({"get_sleep_data": SLEEP_PAYLOAD})
+    fake = FakeGarminClient(
+        {"get_sleep_data": SLEEP_PAYLOAD, "get_user_summary": {"sleepingSeconds": 28800}}
+    )
     server_module.set_garmin_client_for_testing(fake)
 
     await server_module.get_sleep(date="2026-05-07")
     await server_module.get_sleep(date="2026-05-07")
-    assert len(fake.call_log) == 1
+    # sleep + daily summary (contrast) once; the second call is served from cache
+    assert [c[0] for c in fake.call_log] == ["get_sleep_data", "get_user_summary"]
 
 
 @pytest.mark.asyncio

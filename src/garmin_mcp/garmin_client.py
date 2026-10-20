@@ -13,6 +13,7 @@ Responsibilities:
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 from pathlib import Path
 from typing import Any
@@ -35,6 +36,40 @@ class GarminClientError(RuntimeError):
 
 class GarminAuthError(GarminClientError):
     """Raised when re-authentication is required but cannot succeed."""
+
+
+_HTTP_CODE = re.compile(r"\b([1-5]\d\d)\b")
+
+
+def http_status_of(exc: BaseException) -> int | None:
+    """HTTP status behind a failed Garmin call, if one can be found.
+
+    Walks the exception chain for a ``response.status_code`` / ``status_code``
+    (requests, curl_cffi, garth) and falls back to a 4xx/5xx number in the
+    message (garminconnect often only puts it in the text).
+    """
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        response = getattr(current, "response", None)
+        for holder in (response, current):
+            code = getattr(holder, "status_code", None)
+            if isinstance(code, int):
+                return code
+        current = current.__cause__ or current.__context__
+    for match in _HTTP_CODE.finditer(str(exc)):
+        code = int(match.group(1))
+        if code >= 400:
+            return code
+    return None
+
+
+def error_note(exc: BaseException) -> str:
+    """'Garmin call failed (HTTP 429): <literal error>' for tool ``note`` fields."""
+    code = http_status_of(exc)
+    status = f"HTTP {code}" if code is not None else "no HTTP status"
+    return f"Garmin call failed ({status}): {str(exc)[:400]}"
 
 
 _RETRYABLE_NETWORK_EXC = (

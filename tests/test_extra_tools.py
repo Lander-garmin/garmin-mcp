@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
@@ -62,17 +62,17 @@ async def test_heart_rate_timeline_handles_empty_payload() -> None:
 
 @pytest.mark.asyncio
 async def test_generic_tool_wraps_payload_and_drops_nulls() -> None:
-    payload = {"totalSteps": 8123, "floorsAscended": None, "nested": {"a": 1, "b": None}}
-    fake = FakeGarminClient({"get_user_summary": payload})
+    payload = {"avgSpo2": 96, "lowestSpo2": None, "nested": {"a": 1, "b": None}}
+    fake = FakeGarminClient({"get_spo2_data": payload})
     server_module.set_garmin_client_for_testing(fake)
 
-    result = await extra_tools.get_daily_summary(date="2026-05-10")
+    result = await extra_tools.get_spo2(date="2026-05-11")
     assert isinstance(result, GarminData)
-    assert result.source == "get_user_summary"
-    assert result.params == {"date": "2026-05-10"}
-    assert result.data == {"totalSteps": 8123, "nested": {"a": 1}}
-    assert result.note is None
-    assert fake.call_log == [("get_user_summary", ("2026-05-10",), {})]
+    assert result.source == "get_spo2_data"
+    assert result.params == {"date": "2026-05-11"}
+    assert result.data == {"avgSpo2": 96, "nested": {"a": 1}}
+    assert result.status == "ok" and result.note is None
+    assert fake.call_log == [("get_spo2_data", ("2026-05-11",), {})]
 
 
 @pytest.mark.asyncio
@@ -82,6 +82,7 @@ async def test_generic_tool_reports_empty_data() -> None:
 
     result = await extra_tools.get_spo2(date="2026-05-10")
     assert result.data == {}
+    assert result.status == "empty"
     assert result.note is not None and "no data" in result.note
 
 
@@ -150,12 +151,18 @@ async def test_activity_timeseries_builds_named_series() -> None:
 
 @pytest.mark.asyncio
 async def test_devices_combines_list_and_last_sync() -> None:
+    upload_ms = int(datetime(2026, 10, 20, 1, 10, 24, tzinfo=UTC).timestamp() * 1000)
     fake = FakeGarminClient(
         {
             "get_devices": [{"deviceId": 1, "productDisplayName": "Forerunner 265"}],
             "get_device_last_used": {
-                "lastUsedDeviceUploadTime": _ms(8, 30),
+                "lastUsedDeviceUploadTime": upload_ms,
                 "lastUsedDeviceName": "FR",
+            },
+            "get_user_summary": {
+                "lastSyncTimestampGMT": "2026-10-20T07:47:15.692",
+                "wellnessStartTimeGmt": "2026-10-19T22:00:00.0",
+                "wellnessStartTimeLocal": "2026-10-20T00:00:00.0",
             },
         }
     )
@@ -163,7 +170,12 @@ async def test_devices_combines_list_and_last_sync() -> None:
 
     result = await extra_tools.get_devices()
     assert result.data["devices"][0]["productDisplayName"] == "Forerunner 265"
-    assert result.data["last_sync_local_time"].startswith("2026-05-10T08:30")
+    # Both times in the account's local time (+02:00 from Garmin), independent of
+    # the server clock: the device upload and the real last sync of today's data.
+    assert result.data["utc_offset"] == "+02:00"
+    assert result.data["device_upload_time"] == "2026-10-20T03:10:24"
+    assert result.data["last_sync_time"] == "2026-10-20T09:47:15"
+    assert "last_sync_local_time" not in result.data
 
 
 @pytest.mark.asyncio

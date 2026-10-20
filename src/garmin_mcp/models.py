@@ -23,22 +23,50 @@ class SleepSummary(_StrictBase):
     """One night of sleep, summarised."""
 
     date: str = Field(description="Calendar date for the sleep period, YYYY-MM-DD.")
+    requested_date: str | None = Field(
+        default=None, description="Date that was asked for. Compare with garmin_calendar_date."
+    )
+    garmin_calendar_date: str | None = Field(
+        default=None,
+        description="calendarDate Garmin actually returned for this sleep (null if none).",
+    )
+    status: str = Field(
+        default="ok",
+        description=(
+            "ok = Garmin returned data; empty = Garmin answered OK but with no data for "
+            "this date (not recorded or not synced); error = the Garmin call failed (see note)."
+        ),
+    )
+    sleep_start_local: str | None = Field(
+        default=None, description="Bedtime (sleep start), local wall-clock time, ISO-8601."
+    )
+    sleep_end_local: str | None = Field(
+        default=None, description="Wake-up time (sleep end), local wall-clock time, ISO-8601."
+    )
     sleep_score: int | None = Field(default=None, description="Garmin sleep score, 0 to 100.")
     sleep_quality: str | None = Field(
         default=None, description="Qualitative label such as GOOD or POOR."
     )
     total_sleep_seconds: int | None = None
-    deep_sleep_seconds: int | None = None
-    light_sleep_seconds: int | None = None
-    rem_sleep_seconds: int | None = None
-    awake_seconds: int | None = None
+    deep_sleep_seconds: int | None = Field(default=None, description="null = not reported.")
+    light_sleep_seconds: int | None = Field(default=None, description="null = not reported.")
+    rem_sleep_seconds: int | None = Field(default=None, description="null = not reported.")
+    awake_seconds: int | None = Field(default=None, description="null = not reported.")
+    summary_sleeping_seconds: int | None = Field(
+        default=None,
+        description=(
+            "sleepingSeconds from Garmin's daily summary, set only when it differs from "
+            "total_sleep_seconds by more than 15 min (see note)."
+        ),
+    )
     avg_overnight_hrv_ms: float | None = Field(
         default=None, description="Average overnight HRV in milliseconds."
     )
     avg_respiration: float | None = None
     avg_spo2: float | None = None
     note: str | None = Field(
-        default=None, description="Set when no sleep data was found for the date."
+        default=None,
+        description="Explains missing or provisional data, or the Garmin error.",
     )
 
 
@@ -207,11 +235,18 @@ class StepsAndCalories(_StrictBase):
 class RHRDay(_StrictBase):
     date: str
     rhr_bpm: int | None = None
+    status: str = Field(
+        default="ok", description="ok / empty (Garmin OK, no value) / error (call failed)."
+    )
+    error: str | None = Field(default=None, description="Literal Garmin error when status=error.")
 
 
 class RestingHeartRateTrend(_StrictBase):
     days: list[RHRDay]
     avg_rhr_bpm: float | None = None
+    note: str | None = Field(
+        default=None, description="Which days came back empty or failed, and why."
+    )
 
 
 class StressBucket(_StrictBase):
@@ -345,6 +380,10 @@ class DailyBriefing(_StrictBase):
     """
 
     date: str = Field(description="Calendar date the briefing is anchored to, YYYY-MM-DD.")
+    section_errors: dict[str, str] = Field(
+        default_factory=dict,
+        description="Literal error per section that failed (section -> message).",
+    )
     sleep: SleepSummary | None = None
     hrv: HRVStatus | None = None
     body_battery: BodyBatterySummary | None = None

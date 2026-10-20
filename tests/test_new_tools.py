@@ -346,9 +346,7 @@ def _rhr_ramp() -> Any:
     def _respond(_date: str) -> dict[str, Any]:
         value = 50 + counter["n"]
         counter["n"] += 1
-        return {
-            "allMetrics": {"metricsMap": {"WELLNESS_RESTING_HEART_RATE": [{"value": value}]}}
-        }
+        return {"allMetrics": {"metricsMap": {"WELLNESS_RESTING_HEART_RATE": [{"value": value}]}}}
 
     return _respond
 

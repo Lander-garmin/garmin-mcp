@@ -21,10 +21,10 @@ import json
 import logging
 import os
 import sys
+from datetime import UTC, datetime, timedelta
 from datetime import (
     date as Date,  # noqa: N812 (capitalised to avoid shadowing the `date` parameter on tools)
 )
-from datetime import datetime, timedelta
 from typing import Any
 
 import structlog
@@ -51,7 +51,7 @@ from garmin_mcp.exercise_resolver import (
     resolve_exercise,
     valid_exercise_names,
 )
-from garmin_mcp.garmin_client import GarminClient, GarminClientError
+from garmin_mcp.garmin_client import GarminClient, GarminClientError, error_note
 from garmin_mcp.models import (
     Activity,
     ActivityDetail,
@@ -276,13 +276,84 @@ def _seconds_to_iso_local(epoch_ms: int | None) -> str | None:
         return None
 
 
+def _parse_garmin_time(value: Any) -> datetime | None:
+    """Garmin ISO-ish timestamps ('2026-10-20T07:47:15.692', '2026-10-20 07:47:15.0')."""
+    if not value or not isinstance(value, str):
+        return None
+    text = value.strip().replace(" ", "T")
+    if "." in text:
+        head, frac = text.split(".", 1)
+        text = head + "." + (frac + "000000")[:6]
+    try:
+        return datetime.fromisoformat(text)
+    except ValueError:
+        return None
+
+
+def _utc_offset(gmt: Any, local: Any) -> timedelta | None:
+    """User's UTC offset from a pair of Garmin GMT/local timestamps of the same instant.
+
+    Garmin reports both (wellnessStartTimeGmt/Local, startTimestampGMT/Local), so
+    this is the account's real timezone, independent of the server's (Render: UTC).
+    """
+    g, loc = _parse_garmin_time(gmt), _parse_garmin_time(local)
+    if g is None or loc is None:
+        return None
+    minutes = round((loc - g).total_seconds() / 900) * 15  # snap to 15 min
+    return timedelta(minutes=minutes)
+
+
+def _epoch_ms_to_local_iso(epoch_ms: Any, offset: timedelta | None) -> str | None:
+    """A UTC epoch in ms as the user's local wall-clock time (offset from Garmin)."""
+    if epoch_ms is None:
+        return None
+    if offset is None:
+        return _seconds_to_iso_local(epoch_ms)
+    try:
+        moment = datetime.fromtimestamp(int(epoch_ms) / 1000.0, tz=UTC)
+    except (TypeError, ValueError, OSError):
+        return None
+    return (moment + offset).replace(tzinfo=None).isoformat(timespec="seconds")
+
+
+def _gmt_to_local_iso(gmt: Any, offset: timedelta | None) -> str | None:
+    """A Garmin GMT timestamp string as local wall-clock ISO time."""
+    moment = _parse_garmin_time(gmt)
+    if moment is None or offset is None:
+        return None
+    return (moment + offset).isoformat(timespec="seconds")
+
+
+def _local_ms_to_iso(epoch_ms: Any) -> str | None:
+    """Garmin '...TimestampLocal' values: local wall-clock time encoded as a UTC epoch."""
+    if epoch_ms is None:
+        return None
+    try:
+        moment = datetime.fromtimestamp(int(epoch_ms) / 1000.0, tz=UTC)
+    except (TypeError, ValueError, OSError):
+        return None
+    return moment.replace(tzinfo=None).isoformat(timespec="seconds")
+
+
+class _PartialResult(Exception):  # noqa: N818 - control flow, not an error
+    """Carries a result that must not be cached (some Garmin calls failed)."""
+
+    def __init__(self, value: Any) -> None:
+        super().__init__("partial result")
+        self.value = value
+
+
 def _rhr_deviation(trend: RestingHeartRateTrend) -> float | None:
     """Most recent RHR minus the average of the prior days in the window.
 
     The trailing average excludes the latest reading so a single elevated day
     stands out against its own baseline rather than being diluted by it.
-    Returns None when fewer than two days of data are present.
+    Returns None when fewer than two days of data are present, or when the
+    last day of the window has no value (comparing an older day would pass it
+    off as today's).
     """
+    if not trend.days or trend.days[-1].rhr_bpm is None:
+        return None
     values = [d.rhr_bpm for d in trend.days if d.rhr_bpm is not None]
     if len(values) < 2:
         return None
@@ -297,9 +368,37 @@ def _rhr_deviation(trend: RestingHeartRateTrend) -> float | None:
 # ---------------------------------------------------------------------------
 
 
+SLEEP_CONTRAST_SECONDS = 15 * 60
+
+
+def _contrast_sleep(summary: SleepSummary, daily: Any) -> SleepSummary:
+    """Flag a sleep record that disagrees with the daily summary by more than 15 min."""
+    if not isinstance(daily, dict) or not summary.total_sleep_seconds:
+        return summary
+    sleeping = _opt_int(daily.get("sleepingSeconds"))
+    if sleeping is None or abs(sleeping - summary.total_sleep_seconds) <= SLEEP_CONTRAST_SECONDS:
+        return summary
+    gap = round((sleeping - summary.total_sleep_seconds) / 60)
+    text = (
+        f"The daily summary reports sleepingSeconds={sleeping} ({gap:+d} min vs this record). "
+        "The sleep record covers the whole night (from bedtime, possibly before midnight); "
+        "the daily summary only counts sleep inside this calendar day. A big gap right after "
+        "waking can also mean the watch has only partially synced the night."
+    )
+    note = f"{summary.note} {text}" if summary.note else text
+    return summary.model_copy(update={"summary_sleeping_seconds": sleeping, "note": note})
+
+
 @mcp.tool()
 async def get_sleep(date: str | None = None) -> SleepSummary:
-    """Sleep duration, sleep stages, sleep score, and overnight HRV.
+    """Sleep duration, stages, bedtime / wake-up time, sleep score and overnight HRV.
+
+    ``status`` tells apart ok (data), empty (Garmin answered OK with no sleep for
+    the date) and error (the call failed; the literal error is in ``note``). A
+    stage Garmin did not report is null, never 0. ``garmin_calendar_date`` is
+    the date Garmin actually returned; it can differ from ``requested_date``.
+    Right after waking the record can be provisional (partial sync): the value
+    is re-read every 5 min for today and yesterday.
 
     Args:
         date: Calendar date in YYYY-MM-DD format. Defaults to last night
@@ -308,13 +407,36 @@ async def get_sleep(date: str | None = None) -> SleepSummary:
     """
     target_date = _normalise_date(date, _yesterday_iso())
     cache_key = TTLCache.make_key("get_sleep", {"date": target_date})
+    recent = target_date >= _yesterday_iso()
 
     async def fetch() -> SleepSummary:
         client = _get_garmin()
         raw = await client.call("get_sleep_data", target_date)
-        return _parse_sleep(raw, target_date)
+        summary = _parse_sleep(raw, target_date)
+        if summary.status != "ok":
+            return summary
+        try:
+            daily = await client.call("get_user_summary", target_date)
+        except GarminClientError as exc:
+            note = "Could not compare with the daily summary: " + error_note(exc)
+            raise _PartialResult(
+                summary.model_copy(
+                    update={"note": f"{summary.note} {note}" if summary.note else note}
+                )
+            ) from exc
+        return _contrast_sleep(summary, daily)
 
-    result: SleepSummary = await _cache.get_or_compute(cache_key, 3600, fetch)
+    try:
+        result: SleepSummary = await _cache.get_or_compute(
+            cache_key, 300 if recent else 3600, fetch
+        )
+    except _PartialResult as partial:
+        return partial.value  # type: ignore[no-any-return]
+    except GarminClientError as exc:
+        log.warning("sleep.failed", date=target_date, error=str(exc)[:200])
+        return SleepSummary(
+            date=target_date, requested_date=target_date, status="error", note=error_note(exc)
+        )
     return result
 
 
@@ -520,15 +642,37 @@ async def get_steps_and_calories(date: str | None = None) -> StepsAndCalories:
     return result
 
 
+def _rhr_note(rows: list[RHRDay]) -> str | None:
+    empty = [r.date for r in rows if r.status == "empty"]
+    failed = [r for r in rows if r.status == "error"]
+    parts: list[str] = []
+    if empty:
+        parts.append(
+            "Garmin answered OK but with no resting HR for "
+            + ", ".join(empty)
+            + " (the watch did not record or upload heart rate those days)."
+        )
+    for r in failed:
+        parts.append(f"{r.date}: {r.error}")
+    return " ".join(parts) or None
+
+
 @mcp.tool()
-async def get_resting_heart_rate(days: int = 7) -> RestingHeartRateTrend:
-    """Resting heart rate trend over the last ``days`` days.
+async def get_resting_heart_rate(
+    days: int = 7, end_date: str | None = None
+) -> RestingHeartRateTrend:
+    """Resting heart rate trend over ``days`` days ending on ``end_date``.
+
+    Each day has a ``status``: ok, empty (Garmin answered OK but has no value:
+    the watch did not record HR) or error (the call failed; literal error in
+    ``error``). ``note`` summarises the empty and failed days.
 
     Args:
-        days: How many recent days to include. Capped at 28.
+        days: How many days to include. Capped at 28.
+        end_date: Last day, YYYY-MM-DD. Defaults to today.
     """
     days = max(1, min(28, days))
-    end = Date.today()
+    end = Date.fromisoformat(_normalise_date(end_date, _today_iso()))
     cache_key = TTLCache.make_key("get_resting_heart_rate", {"days": days, "end": end.isoformat()})
 
     async def fetch() -> RestingHeartRateTrend:
@@ -541,13 +685,20 @@ async def get_resting_heart_rate(days: int = 7) -> RestingHeartRateTrend:
                 raw = await client.call("get_rhr_day", d)
             except GarminClientError as exc:
                 log.warning("rhr.day.failed", date=d, error=str(exc)[:200])
-                raw = None
+                rows.append(RHRDay(date=d, status="error", error=error_note(exc)))
+                continue
             rows.append(_parse_rhr_day(d, raw))
         valid = [r.rhr_bpm for r in rows if r.rhr_bpm is not None]
         avg = sum(valid) / len(valid) if valid else None
-        return RestingHeartRateTrend(days=rows, avg_rhr_bpm=avg)
+        trend = RestingHeartRateTrend(days=rows, avg_rhr_bpm=avg, note=_rhr_note(rows))
+        if any(r.status == "error" for r in rows):
+            raise _PartialResult(trend)  # do not cache failures
+        return trend
 
-    result: RestingHeartRateTrend = await _cache.get_or_compute(cache_key, 3600, fetch)
+    try:
+        result: RestingHeartRateTrend = await _cache.get_or_compute(cache_key, 3600, fetch)
+    except _PartialResult as partial:
+        return partial.value  # type: ignore[no-any-return]
     return result
 
 
@@ -633,29 +784,39 @@ async def get_daily_briefing(date: str | None = None) -> DailyBriefing:
         "training_load",
         "resting_heart_rate",
     )
+    # Every dated section gets the SAME resolved date: passing the raw ``date``
+    # (None) let get_sleep fall back to its own default (yesterday) - an
+    # off-by-one night on the default call.
     coros = (
-        get_sleep(date),
+        get_sleep(target_date),
         get_hrv_status(),
-        get_body_battery(date),
-        get_training_readiness(date),
+        get_body_battery(target_date),
+        get_training_readiness(target_date),
         get_training_load(),
-        get_resting_heart_rate(),
+        get_resting_heart_rate(end_date=target_date),
     )
     results = await asyncio.gather(*coros, return_exceptions=True)
 
     fields: dict[str, Any] = {"date": target_date}
     unavailable: list[str] = []
+    errors: dict[str, str] = {}
     for name, result in zip(section_names, results, strict=True):
         if isinstance(result, BaseException):
             log.warning("daily_briefing.section.failed", section=name, error=str(result)[:200])
             fields[name] = None
             unavailable.append(name)
+            errors[name] = error_note(result)
+        elif getattr(result, "status", "ok") == "error":
+            fields[name] = None
+            unavailable.append(name)
+            errors[name] = str(getattr(result, "note", "") or "error")
         else:
             fields[name] = result
 
     rhr = fields.get("resting_heart_rate")
     fields["rhr_vs_baseline_bpm"] = _rhr_deviation(rhr) if rhr is not None else None
     fields["sections_unavailable"] = unavailable
+    fields["section_errors"] = errors
     return DailyBriefing(**fields)
 
 
@@ -1542,7 +1703,12 @@ async def unschedule_workout(schedule_id: str) -> WorkoutUnscheduled:
 
 def _parse_sleep(raw: Any, date: str) -> SleepSummary:
     if not raw or not isinstance(raw, dict):
-        return SleepSummary(date=date, note="No sleep data was recorded for this date.")
+        return SleepSummary(
+            date=date,
+            requested_date=date,
+            status="empty",
+            note="Garmin answered OK but returned no sleep record for this date.",
+        )
 
     daily = raw.get("dailySleepDTO") or {}
     sleep_score: int | None = None
@@ -1556,21 +1722,53 @@ def _parse_sleep(raw: Any, date: str) -> SleepSummary:
     hrv = raw.get("hrvSummary") or {}
     avg_hrv = _opt_float(hrv.get("lastNightAvg")) if isinstance(hrv, dict) else None
 
+    calendar_date = _opt_str(daily.get("calendarDate"))
+    # Stage keys of dailySleepDTO (the /sleep-service endpoint). An absent key
+    # stays None: "not reported" must not read as "0 seconds of REM".
+    stages = {
+        "deep": _opt_int(daily.get("deepSleepSeconds")),
+        "light": _opt_int(daily.get("lightSleepSeconds")),
+        "rem": _opt_int(daily.get("remSleepSeconds")),
+        "awake": _opt_int(daily.get("awakeSleepSeconds")),
+    }
     summary = SleepSummary(
-        date=daily.get("calendarDate") or date,
+        date=calendar_date or date,
+        requested_date=date,
+        garmin_calendar_date=calendar_date,
+        sleep_start_local=_local_ms_to_iso(daily.get("sleepStartTimestampLocal")),
+        sleep_end_local=_local_ms_to_iso(daily.get("sleepEndTimestampLocal")),
         sleep_score=sleep_score,
         sleep_quality=sleep_quality,
         total_sleep_seconds=_opt_int(daily.get("sleepTimeSeconds")),
-        deep_sleep_seconds=_opt_int(daily.get("deepSleepSeconds")),
-        light_sleep_seconds=_opt_int(daily.get("lightSleepSeconds")),
-        rem_sleep_seconds=_opt_int(daily.get("remSleepSeconds")),
-        awake_seconds=_opt_int(daily.get("awakeSleepSeconds")),
+        deep_sleep_seconds=stages["deep"],
+        light_sleep_seconds=stages["light"],
+        rem_sleep_seconds=stages["rem"],
+        awake_seconds=stages["awake"],
         avg_overnight_hrv_ms=avg_hrv,
         avg_respiration=_opt_float(daily.get("averageRespirationValue")),
         avg_spo2=_opt_float(daily.get("averageSpO2Value")),
     )
     if summary.total_sleep_seconds in (None, 0):
-        summary = summary.model_copy(update={"note": "No sleep data was recorded for this date."})
+        return summary.model_copy(
+            update={
+                "status": "empty",
+                "note": "Garmin answered OK but the sleep record is empty "
+                "(not recorded, or the watch has not synced the night yet).",
+            }
+        )
+    notes: list[str] = []
+    if calendar_date and calendar_date != date:
+        notes.append(f"Garmin returned the sleep of {calendar_date}, not {date}.")
+    missing = [name for name, value in stages.items() if value is None]
+    if missing:
+        notes.append("Garmin did not report: " + ", ".join(missing) + " (null, not 0).")
+    if stages["rem"] == 0 and daily.get("deviceRemCapable"):
+        notes.append(
+            "REM is 0 on a REM-capable watch: likely a provisional record from a partial "
+            "sync; ask again after the watch syncs."
+        )
+    if notes:
+        summary = summary.model_copy(update={"note": " ".join(notes)})
     return summary
 
 
@@ -1862,7 +2060,7 @@ def _parse_steps_and_calories(raw: Any, date: str) -> StepsAndCalories:
 
 def _parse_rhr_day(date: str, raw: Any) -> RHRDay:
     if not isinstance(raw, dict):
-        return RHRDay(date=date)
+        return RHRDay(date=date, status="empty")
     rhr: int | None = None
     # Garmin nests RHR as allMetrics.metricsMap.WELLNESS_RESTING_HEART_RATE[*].value
     metrics_map = (raw.get("allMetrics") or {}).get("metricsMap")
@@ -1878,7 +2076,7 @@ def _parse_rhr_day(date: str, raw: Any) -> RHRDay:
                 break
     if rhr is None:
         rhr = _opt_int(raw.get("restingHeartRate") or raw.get("currentDayRestingHeartRate"))
-    return RHRDay(date=date, rhr_bpm=rhr)
+    return RHRDay(date=date, rhr_bpm=rhr, status="ok" if rhr is not None else "empty")
 
 
 def _parse_stress(raw: Any, date: str, summary: Any = None) -> StressSummary:
