@@ -17,7 +17,7 @@ La letra de la semana la calcula `get_training_rules` (19-25/10/2026 = B; despu�
 | Día | Hora | Sesión |
 |---|---|---|
 | L | — | Descanso total. Nunca se programa nada. |
-| M | 17:30 | Pesas Pull + rodaje de 12 km justo después, por pulso: media ≤145 ppm, sin objetivo de ritmo |
+| M | 17:30 | Pesas Pull. Solo pesas: NO se programa rodaje el martes (decisión de Lander, 27/10/2026) |
 | X | 17:30 | Semana A: Pesas Legs · Semana B: Pesas Hyrox |
 | J | 17:30 | Pesas Push |
 | V | 18:30 | Series: 20' calentamiento + 5x1000 a 4:05-4:15 con 2' de recuperación + 10' vuelta a la calma (~10 km) |
@@ -112,7 +112,6 @@ Fuerza: `preview_strength_workout` -> revisar -> `create_strength_workout` con e
 | Wall balls | SQUAT | WALL_BALL | Wall balls |
 
 Carrera: `preview_running_workout` / `create_running_workout`:
-- Rodaje: paso por distancia (`distance_meters`), `hr_min_bpm: 119`, `hr_max_bpm: 145`, sin ritmo.
 - Tirada larga: paso por distancia (`distance_meters`), `hr_min_bpm: 145`, `hr_max_bpm: 155`, sin
   ritmo. La nota indica "máximo 159".
 - Series: por ritmo, como ahora.
@@ -136,9 +135,6 @@ REGLAS DE DECISIÓN (sube / mantiene / baja):
   - Falla dos semanas seguidas -> baja un 10 %.
   - Excepciones: sentadilla fija en 80 kg; trineo +10 kg solo si completa los 60 s sin parar
     (tope 152 kg); dominadas, lastre solo tras 3x12 limpias.
-- Rodaje:
-  - Pulso medio <= 145 -> +1 km la semana siguiente, hasta un tope de 14 km.
-  - Pulso medio por encima de 145 -> misma distancia y aviso.
 - Bici:
   - Pulso medio <= 139 -> se mantiene o sube volumen.
   - Pulso por encima de 139 -> misma duración y aviso de bajar el ritmo.
@@ -152,7 +148,8 @@ REGLAS DE DECISIÓN (sube / mantiene / baja):
   - Una vez al mes (último domingo del mes) la tirada es un medio maratón completo (21,1 km) con
     las mismas condiciones de pulso. Excepción: el domingo 25/10/2026 (semana base) lleva 18 km;
     el primer medio maratón es el 29/11/2026.
-- Volumen de carrera: la semana del 19-25/10/2026 es la semana base, con unos 40 km. Desde ahí,
+- Volumen de carrera: dos carreras por semana (series del viernes ~10 km + tirada del domingo).
+  Desde la semana base, la tirada sube según su regla y el total semanal,
   como máximo +10 % por semana.
 - Pulso en reposo 3 o más ppm por encima de la base durante 2 días, o RPE alto en sesiones
   suaves -> semana de mantenimiento o descarga, sin subir nada.

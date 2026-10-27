@@ -39,7 +39,7 @@ def _sessions(letter: str) -> list[list[str]]:
     wednesday = "Pesas Legs 65 min" if letter == "A" else "Pesas Hyrox 55 min"
     return [
         [],
-        ["Pesas Pull 65 min", "Rodaje 12 km"],
+        ["Pesas Pull 65 min"],
         [wednesday],
         ["Pesas Push 65 min"],
         ["Series 5x1000"],

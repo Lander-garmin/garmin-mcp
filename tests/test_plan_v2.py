@@ -243,6 +243,8 @@ def test_week_letters_alternate_from_reference() -> None:
     plan = rules.week_plan(dt.date(2026, 10, 21))
     assert plan["days"][0]["names"] == ["Descanso total (no programar)"]
     assert plan["days"][2]["names"] == ["Plan X 21/10 Pesas Hyrox 55 min"]
+    # Tuesday is Pull only: no run after the gym (Lander, 27/10/2026)
+    assert plan["days"][1]["names"] == ["Plan M 20/10 Pesas Pull 65 min"]
 
 
 @pytest.mark.asyncio
